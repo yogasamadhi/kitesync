@@ -1,0 +1,55 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: kitesync-backup }
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 14400
+      template:
+        metadata: { labels: { app.kubernetes.io/name: kitesync, app.kubernetes.io/component: backup } }
+        spec:
+          restartPolicy: Never
+          serviceAccountName: kitesync-backup
+          containers:
+            - name: backup-controller
+              image: {{ .Values.backup.image }}
+              args: ["backup", "--adapter", "kubernetes"]
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+                - { name: NODE_EXTRA_CA_CERTS, value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt }
+                - { name: KITESYNC_HUB_AGENT_URL, value: "https://kitesync-hub-agent:9443" }
+                - { name: KITESYNC_HUB_AGENT_CA, value: /tls/ca.crt }
+                - { name: KITESYNC_HUB_AGENT_CERT, value: /tls/tls.crt }
+                - { name: KITESYNC_HUB_AGENT_KEY, value: /tls/tls.key }
+                - { name: KITESYNC_HUB_DATA_PVC, value: data-kitesync-hub-0 }
+                - { name: KITESYNC_HUB_STATE_PVC, value: state-kitesync-hub-0 }
+                - { name: KITESYNC_HUB_DATA_RESTORE_SIZE, value: {{ .Values.hub.dataStorage | quote }} }
+                - { name: KITESYNC_HUB_STATE_RESTORE_SIZE, value: {{ .Values.hub.stateStorage | quote }} }
+                - { name: KITESYNC_STORAGE_CLASS, value: {{ .Values.global.storageClass | quote }} }
+                - { name: KITESYNC_SNAPSHOT_CLASS, value: {{ required "backup.snapshotClass is required when backup is enabled" .Values.backup.snapshotClass | quote }} }
+                - { name: KITESYNC_RESTIC_IMAGE, value: {{ .Values.backup.resticImage | quote }} }
+                - { name: KITESYNC_S3_SECRET_NAME, value: kitesync-application }
+                - { name: KITESYNC_CONTROL_PLANE_URL, value: "http://kitesync-control-plane:3000" }
+                - { name: KITESYNC_BACKUP_CONTROLLER_TOKEN, valueFrom: { secretKeyRef: { name: kitesync-application, key: backup-controller-token } } }
+                - { name: KITESYNC_S3_ENDPOINT, value: {{ .Values.backup.s3.endpoint | quote }} }
+                - { name: KITESYNC_S3_BUCKET, value: {{ .Values.backup.s3.bucket | quote }} }
+                - { name: KITESYNC_S3_ACCESS_KEY, valueFrom: { secretKeyRef: { name: kitesync-application, key: s3-access-key } } }
+                - { name: KITESYNC_S3_SECRET_KEY, valueFrom: { secretKeyRef: { name: kitesync-application, key: s3-secret-key } } }
+                - { name: KITESYNC_RETENTION_DAILY, value: {{ .Values.backup.retention.daily | quote }} }
+                - { name: KITESYNC_RETENTION_WEEKLY, value: {{ .Values.backup.retention.weekly | quote }} }
+                - { name: KITESYNC_RETENTION_MONTHLY, value: {{ .Values.backup.retention.monthly | quote }} }
+              securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+                - { name: hub-mtls, mountPath: /tls, readOnly: true }
+          volumes:
+            - { name: tmp, emptyDir: {} }
+            - { name: hub-mtls, secret: { secretName: {{ .Values.tls.hubAgentSecret }} } }
+{{- end }}

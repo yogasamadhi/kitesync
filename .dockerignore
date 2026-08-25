@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+**/dist
+**/release
+.kitesync-dev
+deploy/compose/certs
+vendor/syncthing/bin
+.git
+coverage
+test-results
+playwright-report

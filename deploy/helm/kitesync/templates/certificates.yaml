@@ -1,0 +1,24 @@
+{{- if .Values.tls.issuerRef }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: { name: kitesync-ingress }
+spec:
+  secretName: {{ .Values.tls.existingSecret }}
+  dnsNames: [{{ .Values.ingress.host | quote }}]
+  issuerRef:
+    name: {{ .Values.tls.issuerRef }}
+    kind: {{ .Values.tls.issuerKind }}
+  usages: [server auth]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: { name: kitesync-hub-agent-mtls }
+spec:
+  secretName: {{ .Values.tls.hubAgentSecret }}
+  commonName: kitesync-hub-agent
+  dnsNames: [kitesync-hub-agent, kitesync-hub-agent.{{ .Release.Namespace }}.svc]
+  issuerRef:
+    name: {{ .Values.tls.issuerRef }}
+    kind: {{ .Values.tls.issuerKind }}
+  usages: [server auth, client auth]
+{{- end }}

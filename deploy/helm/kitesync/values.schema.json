@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "controlPlane",
+    "web",
+    "hub",
+    "postgresql",
+    "tls",
+    "ingress",
+    "backup",
+    "monitoring",
+    "networkPolicy",
+    "global"
+  ],
+  "properties": {
+    "global": { "type": "object", "additionalProperties": true },
+    "controlPlane": {
+      "type": "object",
+      "required": ["image", "replicas"],
+      "properties": {
+        "image": { "type": "string" },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1 },
+        "resources": { "type": "object" },
+        "bootstrapToken": { "type": "string" },
+        "cookieSecret": { "type": "string" },
+        "updatePublicKey": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "web": {
+      "type": "object",
+      "required": ["image", "replicas"],
+      "properties": {
+        "image": { "type": "string" },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "resources": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "hub": {
+      "type": "object",
+      "required": [
+        "syncthingImage",
+        "agentImage",
+        "apiKey",
+        "publicAddress",
+        "stateStorage",
+        "dataStorage",
+        "resources"
+      ],
+      "properties": {
+        "syncthingImage": { "type": "string" },
+        "agentImage": { "type": "string" },
+        "apiKey": { "type": "string" },
+        "publicAddress": { "type": "string" },
+        "stateStorage": { "type": "string" },
+        "dataStorage": { "type": "string" },
+        "resources": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "postgresql": {
+      "type": "object",
+      "required": [
+        "internal",
+        "image",
+        "database",
+        "username",
+        "password",
+        "storage",
+        "externalUrl"
+      ],
+      "properties": {
+        "internal": { "type": "boolean" },
+        "image": { "type": "string" },
+        "database": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "storage": { "type": "string" },
+        "externalUrl": { "type": "string" },
+        "resources": { "type": "object" },
+        "pgBackRest": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "issuerRef": { "type": "string" },
+        "issuerKind": { "type": "string" },
+        "hubAgentSecret": { "type": "string" }
+      }
+    },
+    "ingress": { "type": "object", "additionalProperties": true },
+    "backup": { "type": "object", "additionalProperties": true },
+    "monitoring": { "type": "object", "additionalProperties": true },
+    "networkPolicy": { "type": "object", "additionalProperties": true }
+  }
+}

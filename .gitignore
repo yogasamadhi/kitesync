@@ -1,0 +1,17 @@
+.DS_Store
+.env
+.env.local
+.kitesync-dev
+.bun
+coverage
+dist
+node_modules
+out
+release
+test-results
+kitesync-sbom.cdx.json
+vendor/syncthing/bin
+deploy/compose/certs/*.crt
+deploy/compose/certs/*.key
+deploy/compose/certs/*.srl
+!deploy/compose/certs/.gitkeep

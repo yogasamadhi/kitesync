@@ -1,0 +1,105 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: kitesync-hub }
+spec:
+  maxUnavailable: 0
+  selector: { matchLabels: { app.kubernetes.io/component: hub } }
+---
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kitesync-default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kitesync-control-plane }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: control-plane } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/component: web } } }]
+      ports: [{ port: 3000 }]
+    - ports: [{ port: 3000 }]
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    {{- if .Values.postgresql.internal }}
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/component: postgresql } } }]
+      ports: [{ port: 5432 }]
+    {{- else }}
+    - ports: [{ port: 5432 }]
+    {{- end }}
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/component: hub } } }]
+      ports: [{ port: 9443 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kitesync-web }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: web } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 8080 }]
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/component: control-plane } } }]
+      ports: [{ port: 3000 }]
+---
+{{- if .Values.postgresql.internal }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kitesync-postgresql }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: postgresql } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/component: control-plane } } }]
+      ports: [{ port: 5432 }]
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    {{- if .Values.backup.enabled }}
+    - ports: [{ port: 443 }]
+    {{- if ne (int .Values.backup.s3.port) 443 }}
+    - ports: [{ port: {{ .Values.backup.s3.port }} }]
+    {{- end }}
+    {{- end }}
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kitesync-hub }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: hub } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 22000 }, { port: 22000, protocol: UDP }]
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/component: control-plane } } }]
+      ports: [{ port: 9443 }]
+    {{- if .Values.backup.enabled }}
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/component: backup } } }]
+      ports: [{ port: 9443 }]
+    {{- end }}
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+{{- if .Values.backup.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kitesync-backup }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: backup } }
+  policyTypes: [Ingress, Egress]
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/component: hub } } }]
+      ports: [{ port: 9443 }]
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/component: control-plane } } }]
+      ports: [{ port: 3000 }]
+    - ports: [{ port: 443 }]
+    {{- if ne (int .Values.backup.s3.port) 443 }}
+    - ports: [{ port: {{ .Values.backup.s3.port }} }]
+    {{- end }}
+{{- end }}
+{{- end }}

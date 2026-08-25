@@ -1,0 +1,26 @@
+{{- if .Values.monitoring.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: { name: kitesync }
+spec:
+  selector: { matchLabels: { app.kubernetes.io/name: kitesync, app.kubernetes.io/component: control-plane } }
+  endpoints: [{ port: http, path: /metrics, interval: 30s }]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata: { name: kitesync }
+spec:
+  groups:
+    - name: kitesync
+      rules:
+        - alert: KiteSyncHubUnavailable
+          expr: kitesync_hub_up < 1
+          for: 5m
+          labels: { severity: critical }
+          annotations: { summary: "KiteSync Hub Agent is unavailable" }
+        - alert: KiteSyncBackupStale
+          expr: time() - kitesync_backup_last_success_timestamp_seconds > 129600
+          for: 15m
+          labels: { severity: critical }
+          annotations: { summary: "KiteSync has no successful backup in 36 hours" }
+{{- end }}

@@ -1,0 +1,260 @@
+:root {
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    'PingFang SC',
+    sans-serif;
+  color: #172437;
+  background: #f2f5f7;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input {
+  font: inherit;
+}
+.mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: white;
+  font-weight: 900;
+  background: linear-gradient(145deg, #27a67e, #1b6bc6);
+  box-shadow: 0 8px 24px #176a5e3d;
+}
+.welcome {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  align-items: center;
+  gap: 9vw;
+  padding: 8vw;
+  background: radial-gradient(circle at 10% 0, #24486f, #111d2e 60%);
+  color: white;
+}
+.intro h1 {
+  font-size: 64px;
+  margin: 22px 0 10px;
+  letter-spacing: -3px;
+}
+.intro p {
+  color: #aab8c9;
+  max-width: 440px;
+  line-height: 1.7;
+}
+.ks-card {
+  background: white;
+  color: #172437;
+  border: 1px solid #e1e7ed;
+  border-radius: 18px;
+  padding: 26px;
+  box-shadow: 0 12px 35px #07162b1c;
+}
+form {
+  display: grid;
+  gap: 15px;
+}
+label {
+  display: grid;
+  gap: 6px;
+  color: #5d6b7c;
+  font-size: 13px;
+  font-weight: 700;
+}
+input {
+  padding: 11px 12px;
+  border: 1px solid #cad4de;
+  border-radius: 9px;
+  outline: none;
+}
+.ks-button {
+  border: 0;
+  border-radius: 9px;
+  padding: 11px 16px;
+  background: #147b61;
+  color: white;
+  font-weight: 800;
+  cursor: pointer;
+}
+.ks-button:disabled {
+  opacity: 0.45;
+}
+.center {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+.startup-failure {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+.startup-failure .ks-card {
+  width: min(520px, 100%);
+}
+.startup-failure p {
+  color: #718094;
+  line-height: 1.7;
+}
+.center .ks-card {
+  width: 440px;
+}
+.center p {
+  color: #718094;
+}
+.error {
+  color: #b52d39;
+  font-size: 13px;
+}
+.banner {
+  background: #ffecef;
+  padding: 10px 14px;
+  border-radius: 9px;
+}
+.desktop header {
+  height: 76px;
+  padding: 0 5vw;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #111d2f;
+  color: white;
+}
+.brand,
+.device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.device {
+  font-size: 13px;
+  color: #c5d0dc;
+}
+.desktop main {
+  padding: 45px 7vw;
+}
+.hero p {
+  color: #168268;
+  font-weight: 800;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.hero h1 {
+  font-size: 34px;
+  margin: 5px 0;
+}
+.hero-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.host-actions,
+.binding-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.secondary-button,
+.binding-actions button,
+.conflicts button {
+  border: 1px solid #cad4de;
+  border-radius: 8px;
+  background: white;
+  color: #425268;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.binding-actions .danger-button {
+  color: #a52d3c;
+  border-color: #ebc7cc;
+}
+.hero span {
+  color: #768598;
+}
+.space-list {
+  display: grid;
+  gap: 13px;
+  margin-top: 30px;
+}
+.space {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.space h3 {
+  margin: 0 0 6px;
+}
+.space p {
+  color: #7c8999;
+  margin: 0;
+  font-size: 13px;
+}
+.space small {
+  display: block;
+  margin-top: 7px;
+  color: #7c8999;
+}
+.conflicts {
+  margin-top: 30px;
+  padding: 24px;
+  border-radius: 16px;
+  border: 1px solid #f0d5b3;
+  background: #fffaf2;
+}
+.conflicts h2 {
+  margin: 0;
+}
+.conflicts > p {
+  color: #7c6c59;
+}
+.conflicts button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  margin-top: 8px;
+  text-align: left;
+}
+.ks-badge {
+  display: inline-flex;
+  padding: 5px 9px;
+  border-radius: 99px;
+  background: #edf1f4;
+  color: #627184;
+  font-size: 11px;
+}
+.ks-badge--good {
+  background: #dff5ec;
+  color: #0b7256;
+}
+.ks-badge--warn {
+  background: #fff1d3;
+  color: #8d6019;
+}
+.ks-empty {
+  padding: 80px;
+  text-align: center;
+  display: grid;
+  gap: 8px;
+  color: #8290a1;
+  background: white;
+  border: 1px solid #e0e6ec;
+  border-radius: 16px;
+}
+.ks-empty strong {
+  color: #354458;
+}

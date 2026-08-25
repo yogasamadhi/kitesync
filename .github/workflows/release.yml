@@ -1,0 +1,121 @@
+name: Release
+on:
+  push: { tags: ['v*'] }
+permissions: { contents: write, packages: write, id-token: write }
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component:
+          - { name: control-plane, dockerfile: apps/control-plane/Dockerfile }
+          - { name: web, dockerfile: apps/web/Dockerfile }
+          - { name: hub-agent, dockerfile: services/hub-agent/Dockerfile }
+          - { name: backup-controller, dockerfile: services/backup-controller/Dockerfile }
+          - { name: postgresql, dockerfile: services/postgresql/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          {
+            registry: ghcr.io,
+            username: '${{ github.actor }}',
+            password: '${{ secrets.GITHUB_TOKEN }}',
+          }
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: '${{ matrix.component.dockerfile }}'
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: 'ghcr.io/${{ github.repository_owner }}/kitesync-${{ matrix.component.name }}:${{ github.ref_name }}'
+          provenance: true
+          sbom: true
+  desktop:
+    strategy: { matrix: { os: [windows-latest, macos-latest, ubuntu-latest] } }
+    runs-on: '${{ matrix.os }}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.0 }
+      - run: bun install --frozen-lockfile
+      - name: Install offline update verification public key
+        shell: bash
+        run: |
+          test -n "$KITESYNC_UPDATE_PUBLIC_KEY_PEM"
+          printf '%s\n' "$KITESYNC_UPDATE_PUBLIC_KEY_PEM" > apps/desktop/build/update-public-key.pem
+          openssl pkey -pubin -in apps/desktop/build/update-public-key.pem -noout
+        env:
+          KITESYNC_UPDATE_PUBLIC_KEY_PEM: '${{ secrets.KITESYNC_UPDATE_PUBLIC_KEY_PEM }}'
+      - name: Verify Windows signing credentials
+        if: runner.os == 'Windows'
+        shell: bash
+        run: test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
+        env:
+          CSC_LINK: '${{ secrets.WINDOWS_CSC_LINK }}'
+          CSC_KEY_PASSWORD: '${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}'
+      - name: Verify macOS signing and notarization credentials
+        if: runner.os == 'macOS'
+        run: test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" && test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
+        env:
+          CSC_LINK: '${{ secrets.MACOS_CSC_LINK }}'
+          CSC_KEY_PASSWORD: '${{ secrets.MACOS_CSC_KEY_PASSWORD }}'
+          APPLE_ID: '${{ secrets.APPLE_ID }}'
+          APPLE_APP_SPECIFIC_PASSWORD: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
+          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
+      - name: Verify Linux signing credentials
+        if: runner.os == 'Linux'
+        run: test -n "$LINUX_GPG_PRIVATE_KEY"
+        env:
+          LINUX_GPG_PRIVATE_KEY: '${{ secrets.LINUX_GPG_PRIVATE_KEY }}'
+      - name: Verify pinned Syncthing sidecar
+        if: runner.os != 'macOS'
+        run: bun run syncthing:verify
+      - name: Verify pinned Syncthing sidecars for macOS x64 and arm64
+        if: runner.os == 'macOS'
+        run: |
+          KITESYNC_SYNCTHING_PLATFORM=darwin KITESYNC_SYNCTHING_ARCH=x64 bun run syncthing:verify
+          KITESYNC_SYNCTHING_PLATFORM=darwin KITESYNC_SYNCTHING_ARCH=arm64 bun run syncthing:verify
+      - run: bun run --filter @kitesync/desktop-runtime build
+      - run: bun run --filter @kitesync/desktop dist
+        env:
+          CSC_LINK: "${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_LINK || runner.os == 'macOS' && secrets.MACOS_CSC_LINK || '' }}"
+          CSC_KEY_PASSWORD: "${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || runner.os == 'macOS' && secrets.MACOS_CSC_KEY_PASSWORD || '' }}"
+          APPLE_ID: '${{ secrets.APPLE_ID }}'
+          APPLE_APP_SPECIFIC_PASSWORD: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
+          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
+      - name: Sign Linux packages with GPG
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          printf '%s' "$LINUX_GPG_PRIVATE_KEY" | gpg --batch --import
+          for asset in apps/desktop/release/*.AppImage apps/desktop/release/*.deb; do
+            gpg --batch --yes --armor --detach-sign "$asset"
+          done
+        env:
+          LINUX_GPG_PRIVATE_KEY: '${{ secrets.LINUX_GPG_PRIVATE_KEY }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 'desktop-${{ runner.os }}'
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.asc
+            apps/desktop/release/latest*.yml
+          if-no-files-found: error
+  publish-desktop:
+    needs: desktop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'desktop-*', path: release, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
