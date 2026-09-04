@@ -1,0 +1,3 @@
+[submodule "vendor/syncthing/upstream"]
+	path = vendor/syncthing/upstream
+	url = https://github.com/syncthing/syncthing.git

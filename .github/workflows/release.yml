@@ -1,120 +1,450 @@
 name: Release
+
 on:
-  push: { tags: ['v*'] }
+  push:
+    tags: ['v*']
+
 permissions: { contents: write, packages: write, id-token: write }
+
 jobs:
-  images:
+  gate:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        component:
-          - { name: control-plane, dockerfile: apps/control-plane/Dockerfile }
-          - { name: web, dockerfile: apps/web/Dockerfile }
-          - { name: hub-agent, dockerfile: services/hub-agent/Dockerfile }
-          - { name: backup-controller, dockerfile: services/backup-controller/Dockerfile }
-          - { name: postgresql, dockerfile: services/postgresql/Dockerfile }
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: vendor/syncthing/upstream/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.0 }
+      - run: bun install --frozen-lockfile
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Run static and unit gates
+        run: bun run check
+      - name: Build and verify pinned Syncthing
+        run: |
+          bun run syncthing:build
+          bun run syncthing:build-verify
+      - run: bun run build
+      - name: Validate release SBOM generation
+        env:
+          KITESYNC_VERSION: '${{ github.ref_name }}'
+        run: |
+          bun run sbom
+          version="${GITHUB_REF_NAME#v}"
+          jq -e --arg version "$version" \
+            '.bomFormat == "CycloneDX" and .metadata.component.version == $version' \
+            kitesync-sbom.cdx.json
+      - name: Run host integration tests
+        run: bun run test:integration
+      - name: Install Chromium runtime
+        run: bunx playwright install --with-deps chromium
+      - name: Run Web end-to-end tests
+        run: bun run test:e2e
+      - name: Compile and smoke-test standalone executable
+        env:
+          KITESYNC_VERSION: '${{ github.ref_name }}'
+        run: |
+          mkdir -p "$RUNNER_TEMP/kitesync-smoke"
+          bun --no-env-file scripts/package-node.mjs --compile-only --output "$RUNNER_TEMP/kitesync-smoke/kitesync"
+          test -x "$RUNNER_TEMP/kitesync-smoke/kitesync"
+          "$RUNNER_TEMP/kitesync-smoke/kitesync" --help
+          version="${GITHUB_REF_NAME#v}"
+          test "$("$RUNNER_TEMP/kitesync-smoke/kitesync" --version)" = "$version"
+          bun --no-env-file scripts/smoke-standalone.mjs \
+            "$RUNNER_TEMP/kitesync-smoke/kitesync" \
+            vendor/syncthing/bin/linux-x64/syncthing
+
+  image:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: vendor/syncthing/upstream/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.0 }
+      - name: Verify pinned Syncthing source
+        run: bun scripts/verify-syncthing-vendor.mjs
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
-          {
-            registry: ghcr.io,
-            username: '${{ github.actor }}',
-            password: '${{ secrets.GITHUB_TOKEN }}',
-          }
+          registry: ghcr.io
+          username: '${{ github.actor }}'
+          password: '${{ secrets.GITHUB_TOKEN }}'
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: '${{ matrix.component.dockerfile }}'
+          file: deploy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            KITESYNC_VERSION=${{ github.ref_name }}
+            KITESYNC_REVISION=${{ github.sha }}
           push: true
-          tags: 'ghcr.io/${{ github.repository_owner }}/kitesync-${{ matrix.component.name }}:${{ github.ref_name }}'
+          tags: 'ghcr.io/${{ github.repository_owner }}/kitesync-node:${{ github.ref_name }}'
           provenance: true
           sbom: true
-  desktop:
-    strategy: { matrix: { os: [windows-latest, macos-latest, ubuntu-latest] } }
+
+  image-smoke:
+    needs: image
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: amd64 }
+          - { os: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: '${{ matrix.os }}'
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: '${{ github.actor }}'
+          password: '${{ secrets.GITHUB_TOKEN }}'
+      - name: Smoke native release image and persisted identity
+        env:
+          IMAGE: 'ghcr.io/${{ github.repository_owner }}/kitesync-node:${{ github.ref_name }}'
+          EXPECTED_ARCH: '${{ matrix.arch }}'
+        run: |
+          docker pull "$IMAGE"
+          test "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = "$EXPECTED_ARCH"
+          test "$(docker image inspect --format '{{.Config.User}}' "$IMAGE")" = 'kitesync:kitesync'
+          sudo install -d -o 10001 -g 10001 -m 0750 "$RUNNER_TEMP/kitesync-state" "$RUNNER_TEMP/kitesync-data"
+          start_node() {
+            docker run --detach --name kitesync-release-smoke \
+              --init \
+              --network host \
+              --read-only \
+              --user 10001:10001 \
+              --cap-drop ALL \
+              --security-opt no-new-privileges:true \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+              --env KITESYNC_STATE_DIR=/var/lib/kitesync \
+              --env KITESYNC_DIRECTORY_ROOTS=/data \
+              --mount "type=bind,source=$RUNNER_TEMP/kitesync-state,target=/var/lib/kitesync" \
+              --mount "type=bind,source=$RUNNER_TEMP/kitesync-data,target=/data" \
+              "$IMAGE"
+          }
+          wait_for_node() {
+            ready=0
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent http://127.0.0.1:3210/health >/dev/null; then
+                ready=1
+                break
+              fi
+              sleep 1
+            done
+            test "$ready" = 1
+          }
+          start_node
+          wait_for_node
+          curl --fail --silent http://127.0.0.1:3210/ | grep -Fi '<!doctype html>'
+          docker stop --time 30 kitesync-release-smoke
+          docker rm kitesync-release-smoke
+          before=$(sudo sha256sum "$RUNNER_TEMP/kitesync-state/syncthing/cert.pem" | cut -d' ' -f1)
+          start_node
+          wait_for_node
+          after=$(sudo sha256sum "$RUNNER_TEMP/kitesync-state/syncthing/cert.pem" | cut -d' ' -f1)
+          test "$before" = "$after"
+      - name: Stop release image
+        if: always()
+        run: |
+          docker logs kitesync-release-smoke 2>/dev/null || true
+          docker rm --force kitesync-release-smoke 2>/dev/null || true
+
+  packages:
+    needs: gate
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, artifact: windows-x64 }
+          - { os: macos-15-intel, artifact: macos-x64 }
+          - { os: macos-15, artifact: macos-arm64 }
+          - { os: ubuntu-24.04, artifact: linux-x64 }
+          - { os: ubuntu-24.04-arm, artifact: linux-arm64 }
     runs-on: '${{ matrix.os }}'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
+        with: { submodules: true }
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: vendor/syncthing/upstream/go.sum
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.0 }
       - run: bun install --frozen-lockfile
-      - name: Install offline update verification public key
+      - name: Run platform static and unit gates
+        run: bun run check
+      - name: Install Windows packaging tools and certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_PFX_BASE64: '${{ secrets.WINDOWS_CSC_LINK }}'
+        run: |
+          if (-not $env:WINDOWS_PFX_BASE64) { throw 'Windows signing certificate is required' }
+          choco install nsis --no-progress -y
+          $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object { [version]$_.Directory.Parent.Name } |
+            Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $signTool) { throw 'Windows SDK signtool.exe was not found' }
+          "KITESYNC_SIGNTOOL=$signTool" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\kitesync.pfx", [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+      - name: Install Linux packaging tool
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends rpm
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install macOS signing and notarization credentials
+        if: runner.os == 'macOS'
+        env:
+          MACOS_P12_BASE64: '${{ secrets.MACOS_CSC_LINK }}'
+          MACOS_P12_PASSWORD: '${{ secrets.MACOS_CSC_KEY_PASSWORD }}'
+          APPLE_ID: '${{ secrets.APPLE_ID }}'
+          APPLE_APP_SPECIFIC_PASSWORD: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
+          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
+          KEYCHAIN_PASSWORD: '${{ github.run_id }}-${{ github.run_attempt }}'
+        run: |
+          test -n "$MACOS_P12_BASE64"
+          test -n "$MACOS_P12_PASSWORD"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+          printf '%s' "$MACOS_P12_BASE64" | openssl base64 -d -A > "$RUNNER_TEMP/kitesync.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/kitesync.keychain-db"
+          security default-keychain -s "$RUNNER_TEMP/kitesync.keychain-db"
+          security list-keychains -d user -s "$RUNNER_TEMP/kitesync.keychain-db"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/kitesync.keychain-db"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/kitesync.keychain-db"
+          security import "$RUNNER_TEMP/kitesync.p12" -k "$RUNNER_TEMP/kitesync.keychain-db" -P "$MACOS_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/pkgbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/kitesync.keychain-db"
+          xcrun notarytool store-credentials kitesync-notary --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --keychain "$RUNNER_TEMP/kitesync.keychain-db"
+      - name: Build application and pinned Syncthing
         shell: bash
         run: |
-          test -n "$KITESYNC_UPDATE_PUBLIC_KEY_PEM"
-          printf '%s\n' "$KITESYNC_UPDATE_PUBLIC_KEY_PEM" > apps/desktop/build/update-public-key.pem
-          openssl pkey -pubin -in apps/desktop/build/update-public-key.pem -noout
-        env:
-          KITESYNC_UPDATE_PUBLIC_KEY_PEM: '${{ secrets.KITESYNC_UPDATE_PUBLIC_KEY_PEM }}'
-      - name: Verify Windows signing credentials
+          bun run predev
+          bun run --filter @kitesync/web build
+          bun run syncthing:build
+          bun run syncthing:build-verify
+      - name: Package and sign Windows
         if: runner.os == 'Windows'
         shell: bash
-        run: test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
         env:
-          CSC_LINK: '${{ secrets.WINDOWS_CSC_LINK }}'
-          CSC_KEY_PASSWORD: '${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}'
-      - name: Verify macOS signing and notarization credentials
+          KITESYNC_VERSION: '${{ github.ref_name }}'
+          KITESYNC_WINDOWS_CERTIFICATE: '${{ runner.temp }}\kitesync.pfx'
+          KITESYNC_WINDOWS_CERTIFICATE_PASSWORD: '${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}'
+        run: bun scripts/package-node.mjs
+      - name: Package, sign and notarize macOS
         if: runner.os == 'macOS'
-        run: test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" && test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
         env:
-          CSC_LINK: '${{ secrets.MACOS_CSC_LINK }}'
-          CSC_KEY_PASSWORD: '${{ secrets.MACOS_CSC_KEY_PASSWORD }}'
-          APPLE_ID: '${{ secrets.APPLE_ID }}'
-          APPLE_APP_SPECIFIC_PASSWORD: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
-          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
-      - name: Verify Linux signing credentials
+          KITESYNC_VERSION: '${{ github.ref_name }}'
+          KITESYNC_MACOS_APPLICATION_IDENTITY: '${{ secrets.MACOS_APPLICATION_IDENTITY }}'
+          KITESYNC_MACOS_INSTALLER_IDENTITY: '${{ secrets.MACOS_INSTALLER_IDENTITY }}'
+          KITESYNC_MACOS_NOTARY_PROFILE: kitesync-notary
+          KITESYNC_MACOS_NOTARY_KEYCHAIN: '${{ runner.temp }}/kitesync.keychain-db'
+        run: bun scripts/package-node.mjs
+      - name: Package Linux deb and rpm
         if: runner.os == 'Linux'
-        run: test -n "$LINUX_GPG_PRIVATE_KEY"
         env:
-          LINUX_GPG_PRIVATE_KEY: '${{ secrets.LINUX_GPG_PRIVATE_KEY }}'
-      - name: Verify pinned Syncthing sidecar
-        if: runner.os != 'macOS'
-        run: bun run syncthing:verify
-      - name: Verify pinned Syncthing sidecars for macOS x64 and arm64
+          KITESYNC_VERSION: '${{ github.ref_name }}'
+        run: bun scripts/package-node.mjs
+      - name: Smoke test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release/KiteSync-*-windows-x64.exe | Select-Object -First 1
+          if ((Get-AuthenticodeSignature $installer).Status -ne 'Valid') { throw 'Installer signature is invalid' }
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          $runtime = "$env:LOCALAPPDATA\Programs\KiteSync\kitesync.exe"
+          $syncthing = "$env:LOCALAPPDATA\Programs\KiteSync\syncthing.exe"
+          $notices = "$env:LOCALAPPDATA\Programs\KiteSync\THIRD_PARTY_NOTICES.txt"
+          $modules = "$env:LOCALAPPDATA\Programs\KiteSync\SYNCTHING_GO_MODULES.json"
+          if ((Get-AuthenticodeSignature $runtime).Status -ne 'Valid') { throw 'Runtime signature is invalid' }
+          if ((Get-AuthenticodeSignature $syncthing).Status -ne 'Valid') { throw 'Syncthing signature is invalid' }
+          if (-not (Test-Path $notices) -or -not (Test-Path $modules)) { throw 'Syncthing notices are missing' }
+          if (-not (Get-ScheduledTask -TaskName KiteSync -ErrorAction SilentlyContinue)) { throw 'KiteSync scheduled task is missing' }
+          $firewallRules = @(Get-NetFirewallRule -Group KiteSync -ErrorAction Stop)
+          if ($firewallRules.Count -ne 2 -or @($firewallRules | Where-Object { $_.Profile -ne 'Private' }).Count) {
+            throw 'KiteSync Private Network firewall rules are invalid'
+          }
+          $firewallPrograms = @($firewallRules | Get-NetFirewallApplicationFilter | Select-Object -ExpandProperty Program -Unique)
+          if ($firewallPrograms.Count -ne 1 -or $firewallPrograms[0] -ne $syncthing) {
+            throw 'KiteSync firewall rules do not target the packaged Syncthing executable'
+          }
+          bun --no-env-file scripts/verify-distribution-marker.mjs "$env:LOCALAPPDATA\Programs\KiteSync\SYNCTHING_BUILD.json" $syncthing
+          & $runtime identity
+          & $runtime service status
+          schtasks /Run /TN KiteSync
+          $ready = $false
+          1..30 | ForEach-Object {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:3210/health -TimeoutSec 1 | Out-Null
+              $ready = $true
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ready) { throw 'Installed KiteSync node did not become healthy' }
+          $stateCert = "$env:LOCALAPPDATA\KiteSync\syncthing\cert.pem"
+          if (-not (Test-Path $stateCert)) { throw 'Installed node did not create a persistent identity' }
+          $identityHash = (Get-FileHash -Algorithm SHA256 $stateCert).Hash
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          $ready = $false
+          1..30 | ForEach-Object {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:3210/health -TimeoutSec 1 | Out-Null
+              $ready = $true
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ready) { throw 'In-place upgrade did not restart KiteSync' }
+          if ((Get-FileHash -Algorithm SHA256 $stateCert).Hash -ne $identityHash) { throw 'In-place upgrade changed the node identity' }
+          Start-Process -FilePath "$env:LOCALAPPDATA\Programs\KiteSync\Uninstall.exe" -ArgumentList '/S' -Wait
+          if (Test-Path $runtime) { throw 'Uninstall left the runtime behind' }
+          if (Test-Path "$env:LOCALAPPDATA\Programs\KiteSync") { throw 'Uninstall left the program directory behind' }
+          if (-not (Test-Path $stateCert) -or (Get-FileHash -Algorithm SHA256 $stateCert).Hash -ne $identityHash) {
+            throw 'Uninstall removed or changed the persistent node identity'
+          }
+          if (Get-ScheduledTask -TaskName KiteSync -ErrorAction SilentlyContinue) { throw 'Uninstall left the scheduled task behind' }
+          if (Get-NetFirewallRule -Group KiteSync -ErrorAction SilentlyContinue) { throw 'Uninstall left firewall rules behind' }
+      - name: Smoke test macOS package
         if: runner.os == 'macOS'
         run: |
-          KITESYNC_SYNCTHING_PLATFORM=darwin KITESYNC_SYNCTHING_ARCH=x64 bun run syncthing:verify
-          KITESYNC_SYNCTHING_PLATFORM=darwin KITESYNC_SYNCTHING_ARCH=arm64 bun run syncthing:verify
-      - run: bun run --filter @kitesync/desktop-runtime build
-      - run: bun run --filter @kitesync/desktop dist
-        env:
-          CSC_LINK: "${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_LINK || runner.os == 'macOS' && secrets.MACOS_CSC_LINK || '' }}"
-          CSC_KEY_PASSWORD: "${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || runner.os == 'macOS' && secrets.MACOS_CSC_KEY_PASSWORD || '' }}"
-          APPLE_ID: '${{ secrets.APPLE_ID }}'
-          APPLE_APP_SPECIFIC_PASSWORD: '${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}'
-          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
-      - name: Sign Linux packages with GPG
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          printf '%s' "$LINUX_GPG_PRIVATE_KEY" | gpg --batch --import
-          for asset in apps/desktop/release/*.AppImage apps/desktop/release/*.deb; do
-            gpg --batch --yes --armor --detach-sign "$asset"
+          pkg=$(find release -name 'KiteSync-*.pkg' -print -quit)
+          pkgutil --check-signature "$pkg"
+          xcrun stapler validate "$pkg"
+          spctl --assess --type install --verbose "$pkg"
+          sudo installer -pkg "$pkg" -target /
+          codesign --verify --deep --strict /Applications/KiteSync.app
+          test -s /Applications/KiteSync.app/Contents/Resources/THIRD_PARTY_NOTICES.txt
+          test -s /Applications/KiteSync.app/Contents/Resources/SYNCTHING_GO_MODULES.json
+          bun --no-env-file scripts/verify-distribution-marker.mjs \
+            /Applications/KiteSync.app/Contents/Resources/SYNCTHING_BUILD.json \
+            /Applications/KiteSync.app/Contents/Resources/syncthing
+          runtime=/Applications/KiteSync.app/Contents/Resources/kitesync
+          mac_state="$RUNNER_TEMP/kitesync-macos-state"
+          KITESYNC_STATE_DIR="$mac_state" "$runtime" serve >"$RUNNER_TEMP/kitesync-macos.log" 2>&1 &
+          node_pid=$!
+          cleanup_node() {
+            kill -TERM "$node_pid" 2>/dev/null || true
+            wait "$node_pid" 2>/dev/null || true
+          }
+          trap cleanup_node EXIT
+          ready=0
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:3210/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
           done
-        env:
-          LINUX_GPG_PRIVATE_KEY: '${{ secrets.LINUX_GPG_PRIVATE_KEY }}'
+          test "$ready" = 1
+          test -s "$mac_state/syncthing/cert.pem"
+          identity_before=$(shasum -a 256 "$mac_state/syncthing/cert.pem" | cut -d' ' -f1)
+          cleanup_node
+          trap - EXIT
+          KITESYNC_STATE_DIR="$mac_state" "$runtime" identity
+          test "$(shasum -a 256 "$mac_state/syncthing/cert.pem" | cut -d' ' -f1)" = "$identity_before"
+          /Applications/KiteSync.app/Contents/Resources/kitesync identity
+          /Applications/KiteSync.app/Contents/Resources/kitesync service status
+          service_status=$(/Applications/KiteSync.app/Contents/Resources/kitesync service install)
+          case "$service_status" in
+            enabled|requires-approval) ;;
+            *) echo "Unexpected SMAppService status: $service_status" >&2; exit 1 ;;
+          esac
+          /Applications/KiteSync.app/Contents/Resources/kitesync service remove
+      - name: Smoke test Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          deb=$(find release -name 'KiteSync-*.deb' -print -quit)
+          rpm=$(find release -name 'KiteSync-*.rpm' -print -quit)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | grep -F './opt/kitesync/kitesync'
+          dpkg-deb --contents "$deb" | grep -F './usr/share/doc/kitesync/SYNCTHING_BUILD.json'
+          dpkg-deb --contents "$deb" | grep -F './usr/share/doc/kitesync/THIRD_PARTY_NOTICES.txt'
+          dpkg-deb --contents "$deb" | grep -F './usr/share/doc/kitesync/SYNCTHING_GO_MODULES.json'
+          rpm -qpl "$rpm" | grep -F '/opt/kitesync/kitesync'
+          rpm -qpl "$rpm" | grep -F '/usr/share/doc/kitesync/SYNCTHING_BUILD.json'
+          rpm -qpl "$rpm" | grep -F '/usr/share/doc/kitesync/THIRD_PARTY_NOTICES.txt'
+          rpm -qpl "$rpm" | grep -F '/usr/share/doc/kitesync/SYNCTHING_GO_MODULES.json'
+          sudo dpkg --install "$deb"
+          bun --no-env-file scripts/verify-distribution-marker.mjs \
+            /usr/share/doc/kitesync/SYNCTHING_BUILD.json \
+            /opt/kitesync/syncthing
+          test "$(/usr/bin/kitesync --version)" = "${GITHUB_REF_NAME#v}"
+          sudo -u kitesync env KITESYNC_STATE_DIR=/var/lib/kitesync /usr/bin/kitesync identity
+          sudo /opt/kitesync/kitesync service install --system
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3210/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          identity_before=$(sudo sha256sum /var/lib/kitesync/syncthing/cert.pem | cut -d' ' -f1)
+          sudo dpkg --install "$deb"
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3210/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          identity_after=$(sudo sha256sum /var/lib/kitesync/syncthing/cert.pem | cut -d' ' -f1)
+          test "$identity_before" = "$identity_after"
+          sudo /opt/kitesync/kitesync service status --system
+          sudo /opt/kitesync/kitesync service remove --system
+          sudo dpkg --remove kitesync
+          test "$(sudo sha256sum /var/lib/kitesync/syncthing/cert.pem | cut -d' ' -f1)" = "$identity_before"
+          rpm_name=$(basename "$rpm")
+          docker run --rm \
+            --volume "$PWD/release:/release:ro" \
+            --env "RPM_NAME=$rpm_name" \
+            --env "EXPECTED_VERSION=${GITHUB_REF_NAME#v}" \
+            rockylinux:9 \
+            bash -euxo pipefail -c '
+              dnf install --assumeyes "/release/$RPM_NAME"
+              test "$(/usr/bin/kitesync --version)" = "$EXPECTED_VERSION"
+              runuser -u kitesync -- env KITESYNC_STATE_DIR=/var/lib/kitesync /usr/bin/kitesync identity
+              identity_before=$(sha256sum /var/lib/kitesync/syncthing/cert.pem | cut -d" " -f1)
+              rpm --erase kitesync
+              test "$(sha256sum /var/lib/kitesync/syncthing/cert.pem | cut -d" " -f1)" = "$identity_before"
+            '
       - uses: actions/upload-artifact@v4
         with:
-          name: 'desktop-${{ runner.os }}'
-          path: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.AppImage
-            apps/desktop/release/*.deb
-            apps/desktop/release/*.asc
-            apps/desktop/release/latest*.yml
+          name: 'package-${{ matrix.artifact }}'
+          path: release/*
           if-no-files-found: error
-  publish-desktop:
-    needs: desktop
+
+  publish:
+    needs: [gate, image-smoke, packages]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.0 }
+      - run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
-        with: { pattern: 'desktop-*', path: release, merge-multiple: true }
+        with: { pattern: 'package-*', path: release, merge-multiple: true }
+      - name: Generate release SBOM and source record
+        env:
+          KITESYNC_VERSION: '${{ github.ref_name }}'
+        run: |
+          bun run sbom
+          version="${GITHUB_REF_NAME#v}"
+          mv kitesync-sbom.cdx.json "release/KiteSync-${version}-sbom.cdx.json"
+          cp vendor/syncthing/UPSTREAM.json release/SYNCTHING_SOURCE.json
+      - name: Generate release checksums
+        run: |
+          cd release
+          sha256sum KiteSync-* SYNCTHING_SOURCE.json > SHA256SUMS
+          sha256sum --check SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*

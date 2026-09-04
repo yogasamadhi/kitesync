@@ -1,44 +1,111 @@
-# 生产运行手册
+# 节点运行手册
 
-## 前置条件
+## 桌面节点
 
-- Kubernetes 集群、支持 RWO 与 `VolumeSnapshot` 的 StorageClass/CSI Driver；
-- 内部 DNS、Ingress、组织可信 CA，以及 cert-manager Issuer 或预创建 TLS Secret；
-- S3 兼容存储；
-- 生产数据库密码、Hub API Key、Cookie Secret、一次性 bootstrap token、Backup Controller token；
-- 离线 Ed25519 更新公钥和三平台签名凭据。
+Windows/macOS/Linux 桌面安装包会安装同一个 KiteSync Node、Syncthing sidecar 和登录启动项。
+首次双击应用会启动后台服务、等待健康并在系统浏览器打开 `127.0.0.1:3210`。重复双击复用同一
+实例。
 
-生产默认单副本 Control Plane/Web、单 Hub StatefulSet、内置 PostgreSQL 和 Backup CronJob。若 `postgresql.internal=false`，必须提供 `postgresql.externalUrl`，并由外部数据库平台负责 WAL 归档与备份。
+首次设置管理员密码后，用户才能开启 LAN 管理页。开启 LAN 时应只为可信私有网络放行：
 
-## 安装
+- 管理 UI TCP 3210（可配置）；
+- Syncthing TCP/UDP 22000 或界面显示的实际同步端口；
+- LAN discovery UDP 21027。
 
-先将机密写入受控 values 或外部 Secret 管理流程，不把生产 values 提交到版本库。安装前至少执行：
+Syncthing REST 8385 永远不应从其他主机访问。
+
+## Linux 常在线节点
+
+`.deb`/`.rpm` 同时提供 systemd user unit 和 system unit。桌面用户启用 user unit；headless
+主机显式启用 system unit，后者使用专用 `kitesync` 用户与 `/var/lib/kitesync`。禁止两个 unit
+共享同一状态目录或端口。
 
 ```bash
-helm lint deploy/helm/kitesync -f production-values.yaml
-helm template kitesync deploy/helm/kitesync -f production-values.yaml > rendered.yaml
-kubectl apply --dry-run=server -f rendered.yaml
-helm upgrade --install kitesync deploy/helm/kitesync \
-  --namespace kitesync --create-namespace \
-  -f production-values.yaml --atomic --timeout 20m
+sudo kitesync service install --system
+sudo -u kitesync kitesync setup --system
 ```
 
-安装后验证 `/health/live`、`/health/ready`、`/version`、`/capabilities`，检查 Hub Agent mTLS、Hub Device ID、PVC 绑定、ServiceMonitor 和告警规则。通过内部 Ingress 443 暴露 Web/API；Syncthing TCP/UDP 22000 使用独立 Service，禁止暴露 Syncthing GUI/API。
+安装器不静默修改 ufw/firewalld。system node 必须用
+`sudo -u kitesync env KITESYNC_STATE_DIR=/var/lib/kitesync kitesync identity` 查询身份，避免 root
+在自己的 home 中误建另一套状态；再根据管理页网络状态确认实际端口并执行发行版对应的放行命令。
 
-## 首次初始化与升级
+## 反向代理
 
-Helm 中的一次性 bootstrap token 只用于创建首个管理员，成功后数据库记录使其永久失效。立即轮换或移除 values 中的明文。
+公网或不可信网络必须由外部代理终止 HTTPS。先在节点设置中添加完整 HTTPS origin 与代理来源
+IP/CIDR。默认只信任 loopback 转发头；不要使用宽泛的 `0.0.0.0/0` trusted proxy。
 
-升级遵循：数据库备份成功 → `helm diff`/渲染验证 → 前向迁移 → readiness 通过 → 观察调和队列。迁移 checksum 变化会在构建门禁失败；迁移异常使新 Control Plane 不就绪，禁止继续流量。v1.0 不设计数据库降级迁移，回滚应用前必须确认 schema 向后兼容，否则从升级前备份恢复。
+代理应保留 Host，并设置 `X-Forwarded-For`、`X-Forwarded-Host` 与
+`X-Forwarded-Proto: https`；当前版本不解析 RFC `Forwarded`。同时关闭对
+`/internal/open-token` 的转发。Cloudflare Tunnel 可作为通用 HTTPS 代理，但 KiteSync 不调用
+Cloudflare API，且它不承载 Syncthing 数据面。
 
-## 日常观察
+直接 HTTP LAN 页面会持续显示未加密警告。
 
-重点指标包括 Hub up、调和队列/失败数、备份最近成功时间、空间配额和磁盘容量。出现配额超限时 Control Plane 暂停目标空间配置 mutation/同步，并在容量释放或管理员提高配额后恢复。设备吊销只有 Hub Desired State 已移除设备且 read-after 验证完成后才进入 `completed`。
+## 可选 Docker
 
-## 事件处置
+容器内同时运行 KiteSync 主程序和 Syncthing。Linux 推荐 host network：
 
-- Hub Pod 重建：确认 `state` 与 `data` PVC 未变化、Device ID 与事件 generation 正常；Worker 会在 cursor gap 时拉取完整 snapshot。
-- Control Plane/Worker 崩溃：PostgreSQL 中任务由 `SKIP LOCKED` 重新领取，按稳定资源 ID 幂等重试。
-- 数据库故障：停止新的业务 mutation，按照备份手册恢复 pgBackRest，再启动 Control Plane。
-- Hub 数据损坏：暂停写入，选择同一 snapshot revision 的 state/data 恢复，验证 identity 后再解除 quiesce。
-- 证书泄露或到期：先轮换 Hub Agent mTLS Secret 和客户端信任，再滚动 Agent/Control Plane；不得复用开发 CA。
+```bash
+install -d -m 750 ./data
+sudo chown -R 10001:10001 ./data
+printf '%s' 'replace-with-a-long-password' > ./admin-password
+sudo chown 10001:10001 ./admin-password
+sudo chmod 400 ./admin-password
+export KITESYNC_DATA_DIR="$PWD/data"
+export KITESYNC_ADMIN_PASSWORD_SECRET_FILE="$PWD/admin-password"
+bun run docker:up
+```
+
+镜像固定以 `10001:10001` 运行，因此 bind mount 的数据目录必须允许该 UID/GID 读写。开启 LAN
+UI 时必须使用只读 secret file 提供初始管理员密码；Compose 的本地 file secret 是 bind mount，
+因此源文件也必须由 UID 10001 可读。Compose 默认进一步启用只读 rootfs、移除全部 Linux
+capabilities、设置 `no-new-privileges`，只有 `/var/lib/kitesync`、`/data` 和受限的 `/tmp` 可写。
+bridge 模式的数据面需要映射 TCP/QUIC 端口并给 peers 配置静态地址，Docker 广播边界通常不能
+透明支持 discovery。管理页只应映射为 `127.0.0.1:3210:3210`，或经已配置 HTTPS origin 和
+trusted proxy 的反向代理访问；把 3210 直接映射到 Docker 主机 LAN IP 时，容器接口并不拥有该
+Host，安全校验可能按设计拒绝请求。
+
+## 健康与故障
+
+- `/health` 仅表示 Node Service 存活；管理页显示 Syncthing 健康和实际监听地址。
+- 磁盘不足、扫描错误、conflict 和 paused 状态直接来自 Syncthing。
+- 解除配对不会删除远端已有文件；删除 folder 配置不会删除本机目录。
+- 没有中央撤销或审计。敏感数据泄露时必须在每个 peer 上处理已有副本。
+- 版本历史是本机副本，不替代离线备份。
+
+升级和所有平台的卸载器都保留 state、Syncthing home、证书、Device ID 和同步目录；当前版本
+没有 purge/reset 生产命令，也不会声称替用户销毁身份。
+
+## 人工销毁本机身份
+
+确需销毁身份时，先导出备份并核对实际 `KITESYNC_STATE_DIR`。默认桌面路径分别为 Windows
+`%LOCALAPPDATA%\KiteSync`（旧安装也可能在 `%APPDATA%\KiteSync`）、macOS
+`~/Library/Application Support/KiteSync`、Linux `~/.local/state/kitesync`（旧安装也可能在
+`~/.config/KiteSync`）；Linux system node 固定为 `/var/lib/kitesync`。按以下顺序操作：
+
+1. 用 `kitesync service remove`（system node 加 `--system`）停止并禁用服务，确认没有
+   `kitesync`/其 Syncthing 子进程；
+2. 备份状态目录，并确认用户同步目录不在要移动的状态目录内；
+3. 先把整个状态目录重命名为带日期的 `KiteSync.identity-quarantine-*`，不要直接删除；
+4. 桌面节点重新打开 KiteSync；system node 再执行本节前述的 `service install --system` 与
+   `setup --system`，确认生成了新 Device ID，并在所有 peers 上重新批准；
+5. 经过观察期且确认备份可恢复后，再通过系统文件管理器人工删除隔离目录。
+
+Linux system node 可用下面的可恢复操作完成第 3 步；它只接受固定确认词，并在移动前再次检查
+Syncthing 身份文件。不要把 `state_dir` 改成 `/`、home 或同步数据目录：
+
+```bash
+set -eu
+state_dir=/var/lib/kitesync
+quarantine=/var/lib/kitesync.identity-quarantine-$(date +%Y%m%d-%H%M%S)
+printf '输入 DESTROY KITESYNC IDENTITY 以隔离本机身份：'
+read -r confirmation
+test "$confirmation" = 'DESTROY KITESYNC IDENTITY' || exit 1
+test "$(sudo realpath -- "$state_dir")" = "$state_dir"
+sudo test -f "$state_dir/syncthing/cert.pem"
+sudo test ! -e "$quarantine"
+sudo mv -- "$state_dir" "$quarantine"
+sudo install -d -o kitesync -g kitesync -m 0750 "$state_dir"
+```
+
+此流程不会删除同步目录或 peer 上的副本；旧隔离目录在人工删除前仍可用于回滚。

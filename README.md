@@ -1,57 +1,77 @@
-# KiteSync v1.0
+# KiteSync
 
-KiteSync 是面向单组织局域网的服务器中心型文件同步产品。桌面客户端仅连接一个长期在线的 Syncthing Hub；Control Plane 管理账户、设备、同步空间、策略、审计和调和，服务器保存文件明文副本。
+KiteSync 是一个局域网优先的点对点文件同步应用。Windows、macOS 和 Linux 运行相同的
+KiteSync Node；任意两台节点都可以直接同步。所谓“中心节点”只是一个可选的、长期在线的
+普通 Linux peer，不拥有账户、权限或数据面的特殊权威。
+
+KiteSync 使用 Syncthing 作为同步引擎，并提供更聚焦的中文管理界面：设备指纹确认、文件夹
+邀请、同步模式、版本恢复以及经认证的只读文件浏览。Syncthing REST 始终只监听本机回环地址。
 
 ## 本地开发
 
-要求：Bun 1.4、Node.js 24、Docker Desktop，以及可用的 3000、5173、5432、9000、9001、9443、22000 端口。Bun 负责 workspace、依赖、脚本和开发构建；Node.js 仍是 Control Plane、Hub Agent 与 Desktop Runtime 的生产运行时。
+开发只要求 Bun 1.4+ 与 Go 1.26.x，不要求 Docker、Node.js、PostgreSQL 或 MinIO：
 
 ```bash
 bun run bootstrap
 bun run dev:all
 ```
 
-`bootstrap` 会安装依赖、生成仅用于 localhost 的开发 CA，并从官方发布校验 PGP 签名、SHA-256 和版本后下载 Syncthing v2.1.3。`dev:all` 在 Docker Desktop 中运行 PostgreSQL、MinIO、Hub 和 Hub Agent，在宿主机热重载 Control Plane、Web、Desktop Runtime 与 Electron。
+`bootstrap` 严格按“初始化固定 Syncthing 源码 → frozen lockfile 安装 → 构建本机 sidecar”的顺序
+准备全新 clone；默认开发、检查和 integration 都直接运行在宿主机，不启动 Docker。
 
-`dev:all` 由根目录的 `run.ts` 统一编排：它会检查 Bun、Node.js、Docker Desktop 和应用端口，等待服务健康，并在 Ctrl+C 后停止本次启动的容器但保留开发卷。若 Compose 在启动前已经运行，则不会被脚本误停。
+管理页默认位于 `http://127.0.0.1:3210`。首次使用需要设置当前节点的管理员密码；桌面快捷方式
+通过本机一次性 open token 打开已有会话。
 
-`run.ts` 会在空数据库中自动创建开发管理员，并把登录信息填入 Electron 登录页：用户名 `admin`，密码 `kitesync-development`。可通过 `KITESYNC_DEV_USERNAME`、`KITESYNC_DEV_PASSWORD` 和 `KITESYNC_DEV_DISPLAY_NAME` 覆盖；如果数据库已经初始化，启动器不会修改既有管理员或密码。开发凭据不可用于生产。
-
-常用命令：
+常用验证命令：
 
 ```bash
-bun run dev:deps          # 仅启动 Compose 依赖并执行迁移
-bun run dev               # 仅启动宿主机应用
-bun run debug             # 全量启动，并为 Node 子进程开放随机 Inspector 端口
-bun run run.ts --headless # 不启动 Electron，适合终端/API 调试
-bun run run.ts --no-deps  # 复用已经由其他方式管理的基础依赖
-bun run run.ts --keep-deps # 退出应用后让 Compose 继续运行
-bun run dev:stop          # 停止容器，保留 named volumes
-bun run dev:reset         # 交互确认后删除本地开发数据
-bun run check             # 格式、lint、边界、迁移、类型和单元测试
-bun run test:integration  # PostgreSQL 17 集成测试
-bun run test:e2e          # Web 端到端测试
-bun run licenses:check    # 许可证门禁
+bun run check
+bun run build
+bun run test:integration
+bun run predev && bun run test:e2e
+bun run licenses:check
 ```
 
-## 组件
+## 安装与部署
 
-- `apps/control-plane`：Fastify、TypeBox、Drizzle 与 PostgreSQL 业务事实源和调和 Worker。
-- `apps/web`：React、Vite、TanStack Router/Query 管理控制台。
-- `apps/desktop` 与 `apps/desktop-runtime`：Electron Host/Renderer、独立本地 Runtime、凭据库、Directory Grant 和 Syncthing 进程监督。
-- `services/hub-agent`：通过 mTLS 暴露 Desired State Contract，是唯一持有 Hub Syncthing API Key 的进程。
-- `services/backup-controller`：一致性 CSI 快照、Restic S3 上传、保留与 Control Plane 回调。
-- `deploy/compose`：只用于开发的基础依赖。
-- `deploy/helm/kitesync`：生产 K8s Chart；支持内置或外部 PostgreSQL。
+- Windows x64：NSIS 安装器；
+- macOS 13+ x64/arm64：`/Applications/KiteSync.app` 与签名安装包；
+- Linux x64/arm64：`.deb`、`.rpm`，支持桌面 user service 与常在线 system service；
+- Docker：仅作为 Linux 常在线节点的可选单容器运行方式。
 
-详细设计见 [服务器中心型架构](docs/architecture/KITESYNC_SERVER_CENTRIC_ARCHITECTURE.md)，操作说明见 [本地开发](docs/operations/DEVELOPMENT.md)、[生产运行手册](docs/operations/PRODUCTION_RUNBOOK.md)、[备份恢复](docs/operations/BACKUP_RESTORE.md) 和 [发布手册](docs/operations/RELEASE.md)。
+终端用户不需要安装 Bun、Node.js、Go 或 Docker。发行包包含 Bun 编译的 KiteSync 主程序和独立
+签名的 Syncthing sidecar。
 
-## 安全与范围
+可选容器开发验证：
 
-产品禁用 Syncthing 自动接受、local/global discovery、公共 relay、NAT traversal 和自更新。客户端配置中只允许 Hub 设备，设备身份必须用 Ed25519 产品密钥证明并由 Hub 观察到真实 Syncthing 证书连接后绑定。Web 使用 HttpOnly Cookie、CSRF 与 Argon2id；桌面使用系统凭据库、轮换 refresh token 和内存 access token。
+```bash
+export KITESYNC_DATA_DIR=/srv/kitesync-data
+export KITESYNC_ADMIN_PASSWORD_SECRET_FILE=/etc/kitesync/admin-password
+bun run docker:up
+bun run docker:logs
+```
 
-v1.0 不支持公网、客户端 P2P、原生 Syncthing 客户端、安全只读、多 Hub 调度、active-active、移动端、内容预览或全文搜索。
+容器固定以 UID/GID `10001:10001` 运行，数据目录需要可写，管理员密码源文件需要由该 UID
+只读。Linux 上推荐 host network 以使用 LAN discovery；bridge 网络的数据面必须显式映射同步
+端口并使用静态 peer 地址，管理页则只映射到主机 `127.0.0.1`，或放在已配置的 HTTPS 反向代理
+后面。
 
-## GA 外部验收门
+## 网络与安全边界
 
-源码和自动化已经提供生产交付路径，但正式 GA 仍必须在目标基础设施执行：三平台代码签名与 macOS 公证、真实 CSI/S3 空集群恢复演练、目标 CA/cert-manager 验证、30 台设备 7 天 soak，以及 100 用户/300 设备/100 空间容量测试。这些步骤需要组织的集群、证书和离线发布密钥，不能由本地开发环境代替。
+- 默认 UI 仅监听 `127.0.0.1:3210`/`::1`；设置管理员密码后才可开启 LAN 访问。
+- LAN discovery 使用 UDP 21027；同步数据面通常使用 TCP/UDP 22000。
+- 全局发现、Relay、NAT/STUN、遥测和 Syncthing 自升级保持关闭。
+- 直接 HTTP 只适用于可信局域网。公网访问必须由外部反向代理终止 HTTPS。
+- 反向代理只承载管理页和只读下载，不为 Syncthing 数据面提供互联网穿透。
+
+详细设计与操作说明：
+
+- `docs/architecture/KITESYNC_P2P_NODE_ARCHITECTURE.md`
+- `docs/architecture/node/NODE_SERVICE.md`
+- `docs/operations/DEVELOPMENT.md`
+- `docs/operations/PRODUCTION_RUNBOOK.md`
+- `docs/operations/RELEASE.md`
+- `docs/operations/LEGACY_CLEANUP.md`
+
+Syncthing `v2.1.3` 源码固定在 `vendor/syncthing/upstream`，使用 Go 1.26、只读 module 模式和
+确定的构建元数据自行构建。发行包同时携带 MPL-2.0 许可证与源码地址。

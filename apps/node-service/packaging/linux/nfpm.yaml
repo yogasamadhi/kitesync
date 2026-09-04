@@ -1,0 +1,71 @@
+name: kitesync
+arch: ${KITESYNC_PACKAGE_ARCH}
+platform: linux
+version: ${KITESYNC_PACKAGE_VERSION}
+section: net
+priority: optional
+maintainer: KiteSync
+description: KiteSync 局域网文件同步节点
+homepage: https://github.com/yogasamadhi/kitesync
+depends:
+  - ca-certificates
+  - systemd
+  - util-linux
+  - xdg-utils
+overrides:
+  deb:
+    depends:
+      - ca-certificates
+      - coreutils
+      - passwd
+      - systemd
+      - util-linux
+      - xdg-utils
+  rpm:
+    depends:
+      - ca-certificates
+      - coreutils
+      - glibc-common
+      - shadow-utils
+      - systemd
+      - util-linux
+      - xdg-utils
+contents:
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/kitesync
+    expand: true
+    dst: /opt/kitesync/kitesync
+    file_info: { mode: 0755 }
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/syncthing
+    expand: true
+    dst: /opt/kitesync/syncthing
+    file_info: { mode: 0755 }
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/THIRD_PARTY_NOTICES.txt
+    expand: true
+    dst: /usr/share/doc/kitesync/THIRD_PARTY_NOTICES.txt
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/SYNCTHING_NOTICE.txt
+    expand: true
+    dst: /usr/share/doc/kitesync/SYNCTHING_NOTICE.txt
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/SYNCTHING_LICENSE.txt
+    expand: true
+    dst: /usr/share/doc/kitesync/SYNCTHING_LICENSE.txt
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/SYNCTHING_GO_MODULES.json
+    expand: true
+    dst: /usr/share/doc/kitesync/SYNCTHING_GO_MODULES.json
+  - src: ${KITESYNC_PACKAGE_ROOT}/opt/kitesync/SYNCTHING_BUILD.json
+    expand: true
+    dst: /usr/share/doc/kitesync/SYNCTHING_BUILD.json
+  - src: /opt/kitesync/kitesync
+    dst: /usr/bin/kitesync
+    type: symlink
+  - src: ${KITESYNC_PACKAGE_ROOT}/usr/share/applications/kitesync.desktop
+    expand: true
+    dst: /usr/share/applications/kitesync.desktop
+  - src: ${KITESYNC_PACKAGE_ROOT}/usr/lib/systemd/user/kitesync.service
+    expand: true
+    dst: /usr/lib/systemd/user/kitesync.service
+  - src: ${KITESYNC_PACKAGE_ROOT}/usr/lib/systemd/system/kitesync.service
+    expand: true
+    dst: /usr/lib/systemd/system/kitesync.service
+scripts:
+  postinstall: apps/node-service/packaging/linux/postinstall.sh
+  preremove: apps/node-service/packaging/linux/preremove.sh

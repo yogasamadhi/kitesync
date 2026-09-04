@@ -1,47 +1,67 @@
-# v1.0 发布手册
+# 发布手册
 
-## 发布输入
+正式发布构建一个 Bun 编译主程序和固定源码构建的 Syncthing sidecar，再由各平台原生 runner
+生成安装包。Bun 构建必须使用 ESM、minify、compile，显式关闭 `autoloadDotenv` 与
+`autoloadBunfig`，不启用 bytecode。
 
-Release workflow 构建 Control Plane、Web、Hub Agent、Backup Controller 和 PostgreSQL/pgBackRest 的 `linux/amd64`、`linux/arm64` OCI 镜像，并生成 SBOM/provenance。桌面矩阵构建 Windows x64、macOS x64/arm64、Linux x64。
+支持矩阵：
 
-必须在 CI Secret 中配置 Windows 代码签名证书、Apple Developer ID/公证凭据、Linux GPG 私钥和 `KITESYNC_UPDATE_PUBLIC_KEY_PEM`。workflow 在凭据缺失时失败，不允许产出“正式”未签名安装包。流水线会用该公钥覆盖仓库内仅供开发构建使用的占位公钥。
+| 平台      | 架构         | 交付物                                          |
+| --------- | ------------ | ----------------------------------------------- |
+| Windows   | x64          | 签名 NSIS `.exe`                                |
+| macOS 13+ | x64、arm64   | `/Applications/KiteSync.app` + 签名/公证 `.pkg` |
+| Linux     | x64、arm64   | `.deb`、`.rpm`                                  |
+| OCI       | amd64、arm64 | 可选单 Node 镜像                                |
 
-## 更新清单
+## 签名顺序
 
-更新签名私钥保持离线，不上传 CI。发布操作者先生成包含版本、minimumClientVersion、平台 URL 与 SHA-512 的规范 JSON，再执行：
+1. 从固定 submodule 与固定 Go toolchain 构建并验证 Syncthing；
+2. 编译 KiteSync 主程序并在无仓库/无 node_modules 目录做启动 smoke；
+3. Windows 签 `kitesync.exe`、`syncthing.exe`，再签 NSIS installer；
+4. macOS 分别签 Bun agent（仅它带 JIT entitlements）、Syncthing、Swift launcher 和 app bundle；
+5. 签 installer，notarize 并 staple；
+6. 生成校验和、SBOM 和来源说明后发布。
+
+跨平台 compile 可以用于预检，但正式签名、公证、installer 构建和 smoke 必须在目标平台的原生
+runner 上完成。
+
+正式 tag workflow 要求配置 Windows PFX 的 base64 内容与密码
+（`WINDOWS_CSC_LINK`、`WINDOWS_CSC_KEY_PASSWORD`），以及 macOS Developer ID 证书、应用/
+安装器 identity 和 notarization 凭据（`MACOS_CSC_LINK`、`MACOS_CSC_KEY_PASSWORD`、
+`MACOS_APPLICATION_IDENTITY`、`MACOS_INSTALLER_IDENTITY`、`APPLE_ID`、
+`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`）。缺少凭据时对应平台必须失败，不发布未签名的
+Windows/macOS 安装包。Linux 包由 GitHub Release 的 `SHA256SUMS` 覆盖。
+
+tag workflow 会先在独立 Linux gate 中从 frozen lockfile 完成静态检查、单元测试、固定源码
+Syncthing 构建验证、无 Docker 双节点 integration、Web E2E 和 standalone compile smoke。只有
+该 gate 成功后，平台安装包与可选 OCI 镜像才会并行构建。GitHub Release 同时包含 CycloneDX
+SBOM、`SYNCTHING_SOURCE.json` 和覆盖全部安装包及元数据文件的 `SHA256SUMS`。
+每个平台随包的 `SYNCTHING_BUILD.json` 同时记录源码构建产物（签名前）的
+`sourceBuildSha256` 和代码签名后的 `distributedSha256`；Windows/macOS 验证安装内容时应使用
+后者，不能拿签名前 hash 比较已签名 sidecar。
+
+安装包矩阵会在每个原生平台重新执行静态与单元门禁。Windows smoke 覆盖签名、计划任务、
+Private Network 防火墙、原地覆盖安装和卸载后身份保留；macOS smoke 从已安装 app bundle 启动
+真实服务并验证身份；Linux smoke 覆盖 deb 的 system service、原地升级与卸载，并在 Rocky Linux
+容器中实际安装 rpm。系统级 UI（UAC、Gatekeeper 登录项批准）仍由发布验收人员在真实桌面会话
+中确认。
+
+下载后可在 Linux 上验证：
 
 ```bash
-KITESYNC_UPDATE_PRIVATE_KEY_FILE=/secure/offline-update-key.pem \
-  bun run updates:sign -- unsigned-manifest.json signed-manifest.json
-```
-
-将签名清单与安装包上传 S3，使用 Control Plane Admin API 发布 stable channel。Control Plane 用 Helm Secret 中的 Ed25519 公钥验签；桌面端再校验清单签名、SHA-512 和平台代码签名。低于 `minimumClientVersion` 的客户端禁止新配置 mutation，但既有 Syncthing 文件同步继续。
-
-未签名清单固定使用以下结构；`platform` 使用 Node 平台名 `win32`、`darwin`、`linux`，`arch` 使用 `x64` 或 `arm64`。签名脚本读取 `path` 计算 SHA-512，并在签名输出中移除本地路径：
-
-```json
-{
-  "version": "1.0.0",
-  "channel": "stable",
-  "minimumClientVersion": "1.0.0",
-  "assets": [
-    {
-      "platform": "darwin",
-      "arch": "arm64",
-      "url": "https://updates.example/KiteSync-1.0.0-arm64.dmg",
-      "path": "apps/desktop/release/KiteSync-1.0.0-arm64.dmg"
-    }
-  ]
-}
+sha256sum --check SHA256SUMS
 ```
 
 ## 发布门禁
 
-- `bun run check`、build、integration、E2E、license 和 migration checksum 全部通过；
-- 五个 OCI 镜像在 amd64/arm64 可启动，PostgreSQL 镜像仍报告 major 17；
-- Helm lint、server dry-run、NetworkPolicy/RBAC、升级和回滚预演通过；
-- Windows 签名验证、macOS `codesign`/notarization/staple、Linux GPG/Ed25519 验证通过；
-- Syncthing v2.1.3 的官方 PGP、SHA-256、实际版本和每个平台架构通过；
-- 空集群恢复、30 台设备 7 天 soak 和目标容量测试通过。
-
-只有上述证据归档完成后才能标记 GA。Alpha 只使用 Compose；Beta 首次进入 K8s；RC 冻结 API v1、schema v1 与 Helm values schema。
+- `bun run check`、build、非 Docker integration 和 Web E2E 全部通过；
+- migration legacy checksum、依赖许可证、Syncthing commit/tree/module/hash 门禁通过；
+- 干净 Windows、macOS、Linux 环境没有 Bun/Node/Docker 仍能安装、双击、后台启动；
+- 覆盖升级保持 Device ID、folders 和设置；默认卸载保留数据；
+- Windows Authenticode、Private profile 防火墙和任务失败重启验证通过；
+- macOS Gatekeeper、SMAppService、hardened runtime、公证和 staple 验证通过；
+- Linux user/system service 互斥及升级验证通过；
+- 两台不同平台节点在无中心服务、global discovery 和 Relay 时完成发现/静态地址配对与同步；
+- 文件 API 的 traversal、编码、symlink/junction、隐藏元数据、分页、Range 和鉴权测试通过；
+- 可选 OCI amd64/arm64 镜像分别在原生 runner 完成只读 rootfs 启动、嵌入 UI 与身份持久化重启
+  smoke；LAN 配对仍在部署验收中验证。

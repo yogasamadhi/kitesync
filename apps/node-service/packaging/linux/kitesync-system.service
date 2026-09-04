@@ -1,0 +1,28 @@
+[Unit]
+Description=KiteSync 常驻节点
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kitesync
+Group=kitesync
+StateDirectory=kitesync
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/kitesync
+UMask=0077
+Environment=KITESYNC_STATE_DIR=/var/lib/kitesync
+Environment=KITESYNC_DIRECTORY_ROOTS=/var/lib/kitesync/data
+Environment=KITESYNC_SYNCTHING_BINARY=/opt/kitesync/syncthing
+Environment=KITESYNC_HEADLESS=1
+EnvironmentFile=-/etc/kitesync/kitesync.env
+ExecStart=/opt/kitesync/kitesync serve
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

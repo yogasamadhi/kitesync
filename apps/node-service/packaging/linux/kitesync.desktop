@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KiteSync
+Comment=局域网文件同步
+Exec=/opt/kitesync/kitesync open
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=false

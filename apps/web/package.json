@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@kitesync/api-client": "workspace:*",
     "@kitesync/contracts": "workspace:*",
     "@kitesync/ui": "workspace:*",
     "@tanstack/react-query": "^5.90.2",

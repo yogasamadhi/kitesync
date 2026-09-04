@@ -10,8 +10,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "build": "bun -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json --incremental --tsBuildInfoFile dist/.tsbuildinfo",
+    "dev": "tsc -p tsconfig.json --incremental --tsBuildInfoFile dist/.tsbuildinfo --watch --preserveWatchOutput",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

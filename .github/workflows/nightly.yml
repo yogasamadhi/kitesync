@@ -1,20 +1,54 @@
 name: Nightly
+
 on:
   schedule: [{ cron: '20 18 * * *' }]
   workflow_dispatch:
+
 permissions: { contents: read }
+
 jobs:
-  compose-and-kind:
+  container-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
+        with: { submodules: true }
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: vendor/syncthing/upstream/go.sum
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.0 }
-      - run: bun install --frozen-lockfile
-      - run: bun run dev:certs
-      - run: docker compose -f deploy/compose/docker-compose.yml config --quiet
-      - run: helm template kitesync deploy/helm/kitesync --set controlPlane.bootstrapToken=nightly-bootstrap-token --set controlPlane.cookieSecret=nightly-cookie-secret-0000000000000000 --set hub.apiKey=nightly-hub-key --set postgresql.password=nightly-postgres --set backup.enabled=false > rendered.yaml
-      - uses: helm/kind-action@v1
-      - run: kubectl apply --dry-run=server -f rendered.yaml
+      - name: Verify pinned Syncthing source
+        run: bun --no-env-file scripts/verify-syncthing-vendor.mjs
+      - name: Prepare isolated Docker data and password
+        run: |
+          mkdir -p "$RUNNER_TEMP/kitesync-data"
+          sudo chown 10001:10001 "$RUNNER_TEMP/kitesync-data"
+          sudo chmod 0750 "$RUNNER_TEMP/kitesync-data"
+          printf '%s' 'nightly-kitesync-password' > "$RUNNER_TEMP/kitesync-password"
+          sudo chown 10001:10001 "$RUNNER_TEMP/kitesync-password"
+          sudo chmod 0400 "$RUNNER_TEMP/kitesync-password"
+      - name: Validate and start optional Linux container
+        env:
+          KITESYNC_DATA_DIR: ${{ runner.temp }}/kitesync-data
+          KITESYNC_ADMIN_PASSWORD_SECRET_FILE: ${{ runner.temp }}/kitesync-password
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml config --quiet
+          docker compose -f deploy/docker/docker-compose.yml up -d --build
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3210/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          curl --fail --silent http://127.0.0.1:3210/ | grep -F '<!doctype html>'
+          docker compose -f deploy/docker/docker-compose.yml ps
+      - name: Stop container
+        if: always()
+        env:
+          KITESYNC_DATA_DIR: ${{ runner.temp }}/kitesync-data
+          KITESYNC_ADMIN_PASSWORD_SECRET_FILE: ${{ runner.temp }}/kitesync-password
+        run: docker compose -f deploy/docker/docker-compose.yml down --volumes

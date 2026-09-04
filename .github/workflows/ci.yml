@@ -1,30 +1,102 @@
 name: CI
+
 on:
   pull_request:
   push:
     branches: [main]
+
 permissions: { contents: read }
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
+        with: { submodules: true }
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: vendor/syncthing/upstream/go.sum
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.0 }
       - run: bun install --frozen-lockfile
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - run: bun run check
-      - run: bun run licenses:check
+      - name: Build and verify pinned Syncthing
+        run: |
+          bun run syncthing:build
+          bun run syncthing:build-verify
       - run: bun run build
-      - run: helm lint deploy/helm/kitesync --set controlPlane.bootstrapToken=ci-bootstrap-token-000000 --set controlPlane.cookieSecret=ci-cookie-secret-000000000000000000 --set hub.apiKey=ci-hub-key --set postgresql.password=ci-postgres --set backup.enabled=false
+      - name: Validate release SBOM generation
+        env:
+          KITESYNC_VERSION: 0.0.0-ci
+        run: |
+          bun run sbom
+          jq -e '.bomFormat == "CycloneDX" and .metadata.component.version == "0.0.0-ci"' kitesync-sbom.cdx.json
+      - name: Compile standalone node with embedded UI
+        env:
+          KITESYNC_VERSION: 0.0.0-ci
+        run: |
+          mkdir -p "$RUNNER_TEMP/kitesync-smoke"
+          bun --no-env-file scripts/package-node.mjs --compile-only --output "$RUNNER_TEMP/kitesync-smoke/kitesync"
+          test -x "$RUNNER_TEMP/kitesync-smoke/kitesync"
+          "$RUNNER_TEMP/kitesync-smoke/kitesync" --help
+          test "$("$RUNNER_TEMP/kitesync-smoke/kitesync" --version)" = "0.0.0-ci"
+          bun --no-env-file scripts/smoke-standalone.mjs \
+            "$RUNNER_TEMP/kitesync-smoke/kitesync" \
+            vendor/syncthing/bin/linux-x64/syncthing
+      - name: Build optional single-node container
+        run: |
+          docker build \
+            --build-arg KITESYNC_VERSION=0.0.0-ci \
+            --build-arg KITESYNC_REVISION="$GITHUB_SHA" \
+            --file deploy/docker/Dockerfile \
+            --tag kitesync/node:ci \
+            .
+      - name: Validate optional Compose deployment
+        env:
+          KITESYNC_DATA_DIR: /tmp
+          KITESYNC_ADMIN_PASSWORD_SECRET_FILE: ${{ github.workspace }}/README.md
+        run: |
+          docker compose -f deploy/docker/docker-compose.yml config --quiet
+          test "$(docker compose -f deploy/docker/docker-compose.yml config --services)" = "node"
+      - name: Verify container identity
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' kitesync/node:ci)" = "kitesync:kitesync"
+          docker run --rm --entrypoint /bin/sh kitesync/node:ci -c \
+            'test -s /usr/share/licenses/kitesync/SYNCTHING_SOURCE.json &&
+             test -s /usr/share/licenses/kitesync/THIRD_PARTY_NOTICES.txt &&
+             test -s /usr/share/licenses/kitesync/SYNCTHING_GO_MODULES.json'
+          docker run --rm kitesync/node:ci identity
+
   integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
+        with: { submodules: true }
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: vendor/syncthing/upstream/go.sum
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.0 }
       - run: bun install --frozen-lockfile
+      - name: Build integration-test Syncthing sidecar
+        run: |
+          bun run syncthing:build
+          bun run syncthing:build-verify
+      - run: bun run predev
       - run: bun run test:integration
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.0 }
+      - run: bun install --frozen-lockfile
+      - run: bun run predev
+      - name: Install Chromium runtime
+        run: bunx playwright install --with-deps chromium
+      - run: bun run test:e2e

@@ -1,0 +1,14 @@
+[Unit]
+Description=KiteSync 局域网文件同步
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/kitesync/kitesync serve
+Environment=KITESYNC_SYNCTHING_BINARY=/opt/kitesync/syncthing
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/syncthing/syncthing.git",
+  "version": "v2.1.3",
+  "commit": "946e2b83a1f6c6ae119427c09e0a5802940b82ff",
+  "tree": "70a7d277758efa38c6732191cf703fc9af8ae320",
+  "license": "MPL-2.0",
+  "licenseFileSha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+  "goModSha256": "a129d6ae9cf20593fab4b1fb04ac09b176c4942d3a4bec9394f9c888fe2d1bd1",
+  "goSumSha256": "7e9606117eca33e9263181a3d0141e403c940c55022a061d8ed9e22d4bda2acd",
+  "goVersion": "1.26.0",
+  "sourceDateEpoch": 1785792965,
+  "cgoEnabled": false,
+  "buildTags": ["noupgrade", "sqlite_omit_load_extension", "sqlite_dbstat"]
+}

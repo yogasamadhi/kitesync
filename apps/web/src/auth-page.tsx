@@ -1,9 +1,14 @@
 import { useState, type FormEvent } from 'react';
 import { Button, Card } from '@kitesync/ui';
-import { api, type Session } from './api.js';
+import { api, type AuthSession } from './api.js';
 
-export function AuthPage({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
-  const [mode, setMode] = useState<'login' | 'bootstrap' | 'invitation' | 'reset'>('login');
+export function AuthPage({
+  setupRequired,
+  onAuthenticated,
+}: {
+  setupRequired: boolean;
+  onAuthenticated: (session: AuthSession) => void;
+}) {
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
 
@@ -12,28 +17,20 @@ export function AuthPage({ onAuthenticated }: { onAuthenticated: (session: Sessi
     setPending(true);
     setError('');
     const data = new FormData(event.currentTarget);
+    const password = String(data.get('password') ?? '');
+    const confirmation = String(data.get('confirmation') ?? '');
+
+    if (setupRequired && password !== confirmation) {
+      setError('两次输入的密码不一致');
+      setPending(false);
+      return;
+    }
+
     try {
-      const password = String(data.get('password'));
-      if (mode === 'reset') {
-        await api.resetPassword(String(data.get('token')), password);
-        setMode('login');
-      } else {
-        const username = String(data.get('username'));
-        const session =
-          mode === 'login'
-            ? await api.login(username, password)
-            : mode === 'invitation'
-              ? await api.acceptInvitation(String(data.get('token')), password)
-              : await api.bootstrap({
-                  token: String(data.get('token')),
-                  username,
-                  displayName: String(data.get('displayName')),
-                  password,
-                });
-        onAuthenticated(session);
-      }
+      const session = setupRequired ? await api.setup({ password }) : await api.login({ password });
+      onAuthenticated(session);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法连接服务器');
+      setError(cause instanceof Error ? cause.message : '无法连接到本机 KiteSync');
     } finally {
       setPending(false);
     }
@@ -41,86 +38,52 @@ export function AuthPage({ onAuthenticated }: { onAuthenticated: (session: Sessi
 
   return (
     <main className="auth-shell">
-      <div className="auth-brand">
+      <section className="auth-brand" aria-label="KiteSync 介绍">
         <span className="brand-mark">K</span>
-        <p>局域网文件，始终在掌控之中。</p>
+        <p className="auth-kicker">你的文件，只在你选择的设备间流动。</p>
         <h1>KiteSync</h1>
-        <p className="muted">由你的服务器托管，以熟悉的桌面方式可靠同步。</p>
-      </div>
+        <p className="muted">
+          无需云端账户。当前电脑就是一个独立节点，可与局域网中的其他设备直接同步。
+        </p>
+      </section>
       <Card className="auth-card">
-        <div className="segmented">
-          <button className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>
-            登录
-          </button>
-          <button
-            className={mode === 'bootstrap' ? 'active' : ''}
-            onClick={() => setMode('bootstrap')}
-          >
-            初始化
-          </button>
-          <button
-            className={mode === 'invitation' ? 'active' : ''}
-            onClick={() => setMode('invitation')}
-          >
-            接受邀请
-          </button>
-          <button className={mode === 'reset' ? 'active' : ''} onClick={() => setMode('reset')}>
-            重置密码
-          </button>
-        </div>
-        <h2>
-          {mode === 'login'
-            ? '欢迎回来'
-            : mode === 'bootstrap'
-              ? '创建首位管理员'
-              : mode === 'invitation'
-                ? '加入组织'
-                : '设置新密码'}
-        </h2>
+        <p className="eyebrow">本机管理界面</p>
+        <h2>{setupRequired ? '设置管理密码' : '欢迎回来'}</h2>
+        <p className="auth-help">
+          {setupRequired
+            ? '这是首次启动。密码仅保存在当前电脑，用于保护管理界面。'
+            : '输入这台电脑的管理密码。'}
+        </p>
         <form onSubmit={(event) => void submit(event)}>
-          {mode !== 'login' && (
-            <label>
-              {mode === 'bootstrap' ? '一次性初始化令牌' : '一次性令牌'}
-              <input name="token" required minLength={16} autoComplete="one-time-code" />
-            </label>
-          )}
-          {mode === 'bootstrap' && (
-            <>
-              <label>
-                显示名称
-                <input name="displayName" required />
-              </label>
-            </>
-          )}
-          {(mode === 'login' || mode === 'bootstrap') && (
-            <label>
-              用户名
-              <input name="username" required minLength={3} autoComplete="username" />
-            </label>
-          )}
           <label>
-            密码
+            管理密码
             <input
               name="password"
               type="password"
               required
-              minLength={12}
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              minLength={setupRequired ? 12 : 1}
+              autoFocus
+              autoComplete={setupRequired ? 'new-password' : 'current-password'}
             />
           </label>
+          {setupRequired && (
+            <label>
+              再次输入密码
+              <input
+                name="confirmation"
+                type="password"
+                required
+                minLength={12}
+                autoComplete="new-password"
+              />
+            </label>
+          )}
           {error && <p className="form-error">{error}</p>}
           <Button disabled={pending}>
-            {pending
-              ? '请稍候…'
-              : mode === 'login'
-                ? '登录'
-                : mode === 'bootstrap'
-                  ? '完成初始化'
-                  : mode === 'invitation'
-                    ? '接受邀请'
-                    : '重置密码'}
+            {pending ? '正在处理…' : setupRequired ? '完成设置' : '登录'}
           </Button>
         </form>
+        <p className="local-note">地址栏中的本机地址不会经过 KiteSync 云服务。</p>
       </Card>
     </main>
   );

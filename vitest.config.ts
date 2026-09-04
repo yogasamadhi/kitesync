@@ -6,7 +6,7 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html'],
     },
-    include: ['apps/**/*.test.ts', 'packages/**/*.test.ts', 'services/**/*.test.ts'],
-    passWithNoTests: true,
+    include: ['apps/**/*.test.ts', 'packages/**/*.test.ts'],
+    passWithNoTests: false,
   },
 });

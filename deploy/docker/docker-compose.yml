@@ -1,0 +1,45 @@
+name: kitesync
+
+services:
+  node:
+    image: kitesync/node:local
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    # Syncthing LAN discovery and direct LAN UI access require host networking.
+    # This optional deployment path is intended for a Linux node or always-on home server.
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    user: '10001:10001'
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    stop_grace_period: 30s
+    environment:
+      KITESYNC_HEADLESS: '1'
+      KITESYNC_STATE_DIR: /var/lib/kitesync
+      KITESYNC_DIRECTORY_ROOTS: /data
+      KITESYNC_UI_HOST: 0.0.0.0
+      KITESYNC_UI_PORT: ${KITESYNC_UI_PORT:-3210}
+      KITESYNC_SYNCTHING_GUI_PORT: ${KITESYNC_SYNCTHING_GUI_PORT:-8385}
+      KITESYNC_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    secrets:
+      - admin_password
+    volumes:
+      - kitesync-state:/var/lib/kitesync
+      # 镜像以 10001:10001 运行；首次启动前请执行：
+      # sudo chown -R 10001:10001 "$KITESYNC_DATA_DIR" && sudo chmod 0750 "$KITESYNC_DATA_DIR"
+      - ${KITESYNC_DATA_DIR:?请设置 KITESYNC_DATA_DIR 为允许同步的数据目录}:/data
+
+secrets:
+  admin_password:
+    # Compose file secrets are bind-mounted; the source must be readable by UID 10001.
+    file: ${KITESYNC_ADMIN_PASSWORD_SECRET_FILE:?请设置 KITESYNC_ADMIN_PASSWORD_SECRET_FILE 为管理员密码文件}
+
+volumes:
+  kitesync-state:

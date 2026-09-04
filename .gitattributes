@@ -1,0 +1,4 @@
+/apps/control-plane/migrations/*.sql text eol=lf
+/apps/control-plane/migrations/checksums.sha256 text eol=lf
+/vendor/syncthing/GO_MODULES.json text eol=lf
+/vendor/syncthing/SYNCTHING_THIRD_PARTY_LICENSES.txt text eol=lf
