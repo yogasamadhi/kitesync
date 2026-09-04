@@ -42,6 +42,12 @@ function git(...args) {
   }).trim();
 }
 
+function gitBytes(...args) {
+  return execFileSync('git', ['-C', syncthingSource, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 export function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
@@ -139,13 +145,18 @@ export function assertSyncthingSource() {
   const status = git('status', '--porcelain', '--untracked-files=all');
   if (status) throw new Error(`Syncthing submodule has local changes:\n${status}`);
 
+  // Hash the bytes stored in the pinned tree. Git may legitimately materialize
+  // text files with CRLF in a Windows worktree when core.autocrlf is enabled.
+  // The clean-status check above still rejects semantic source changes.
   const hashes = [
-    ['license', resolve(syncthingSource, 'LICENSE'), syncthingMetadata.licenseFileSha256],
-    ['go.mod', resolve(syncthingSource, 'go.mod'), syncthingMetadata.goModSha256],
-    ['go.sum', resolve(syncthingSource, 'go.sum'), syncthingMetadata.goSumSha256],
+    ['license', 'LICENSE', syncthingMetadata.licenseFileSha256],
+    ['go.mod', 'go.mod', syncthingMetadata.goModSha256],
+    ['go.sum', 'go.sum', syncthingMetadata.goSumSha256],
   ];
   for (const [name, path, expected] of hashes) {
-    const actual = sha256(path);
+    const actual = createHash('sha256')
+      .update(gitBytes('cat-file', 'blob', `${commit}:${path}`))
+      .digest('hex');
     if (actual !== expected) {
       throw new Error(`Syncthing ${name} hash mismatch: expected ${expected}, got ${actual}`);
     }
