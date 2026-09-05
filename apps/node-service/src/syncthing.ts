@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer as createNetServer, isIP } from 'node:net';
 import { createSocket } from 'node:dgram';
 import { dirname, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import type { FolderType } from '@kitesync/contracts';
 import type { NodeConfig } from './config.js';
 import { createSecretFile } from './secret-store.js';
@@ -25,8 +25,23 @@ export interface SyncthingFolderConfig {
   path: string;
   type?: FolderType;
   paused?: boolean;
+  markerName?: string;
   devices?: Array<{ deviceID: string; [key: string]: unknown }>;
   versioning?: { type: string; params?: Record<string, string> };
+  rescanIntervalS?: number;
+}
+
+export interface SyncthingFolderPathConflict {
+  folderId: string;
+  label: string;
+  relation: 'same' | 'ancestor' | 'descendant';
+}
+
+export class FolderPathConflictError extends Error {
+  constructor(readonly conflicts: SyncthingFolderPathConflict[]) {
+    super('所选目录与已有同步文件夹重叠');
+    this.name = 'FolderPathConflictError';
+  }
 }
 
 export interface SyncthingSystemStatus {
@@ -216,6 +231,33 @@ function inside(parent: string, child: string) {
   return safeRelativeChild(relative(parent, child));
 }
 
+function comparablePath(path: string) {
+  const normalized = resolve(path).replace(/[\\/]+$/, '');
+  return process.platform === 'darwin' || process.platform === 'win32'
+    ? normalized.toLocaleLowerCase('en-US')
+    : normalized;
+}
+
+export function folderPathRelation(
+  candidate: string,
+  existing: string,
+): SyncthingFolderPathConflict['relation'] | undefined {
+  const left = comparablePath(candidate);
+  const right = comparablePath(existing);
+  if (left === right) return 'same';
+  if (inside(left, right)) return 'ancestor';
+  if (inside(right, left)) return 'descendant';
+  return undefined;
+}
+
+async function realFolderPath(path: string) {
+  try {
+    return await realpath(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 export function loopbackGuiAddress(value: string | undefined, expectedPort: number) {
   if (!value || value.includes('://')) return false;
   try {
@@ -282,7 +324,13 @@ export class LocalSyncthing {
   private adopted = false;
   private configMutationQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly config: NodeConfig) {}
+  constructor(
+    private readonly config: NodeConfig,
+    private readonly onEvent: (
+      level: 'info' | 'warn' | 'error',
+      message: string,
+    ) => void = () => {},
+  ) {}
 
   start() {
     this.stopping = false;
@@ -320,6 +368,7 @@ export class LocalSyncthing {
       await this.assertOwnedInstance();
       this.adopted = true;
       await this.ensureLanOnlyConfiguration();
+      this.onEvent('info', '已接管属于当前 KiteSync 实例的 Syncthing');
       return false;
     }
 
@@ -345,8 +394,12 @@ export class LocalSyncthing {
     child.once('error', (error) => {
       spawnError = error;
     });
-    child.once('exit', () => {
+    child.once('exit', (code, signal) => {
       if (this.child === child) this.child = undefined;
+      this.onEvent(
+        this.stopping ? 'info' : 'warn',
+        `Syncthing 已退出（code=${code ?? 'null'}，signal=${signal ?? 'none'}）`,
+      );
       if (ready && !this.stopping) this.scheduleRestart();
     });
     const errors: string[] = [];
@@ -363,6 +416,7 @@ export class LocalSyncthing {
         await this.assertOwnedInstance();
         await this.ensureLanOnlyConfiguration();
         ready = true;
+        this.onEvent('info', 'Syncthing 已就绪并应用 LAN-only 安全配置');
         this.scheduleStableReset();
         if (child.exitCode !== null && !this.stopping) this.scheduleRestart();
         return true;
@@ -486,6 +540,10 @@ export class LocalSyncthing {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
       void this.start().catch((error: unknown) => {
+        this.onEvent(
+          'error',
+          `Syncthing 自动重启失败：${error instanceof Error ? error.message : String(error)}`,
+        );
         console.error(
           `Syncthing 自动重启失败：${error instanceof Error ? error.message : String(error)}`,
         );
@@ -598,6 +656,10 @@ export class LocalSyncthing {
 
   deviceStats() {
     return this.request<Record<string, { lastSeen?: string }>>('/rest/stats/device');
+  }
+
+  folderStats() {
+    return this.request<Record<string, { lastFile?: { at?: string } }>>('/rest/stats/folder');
   }
 
   discovery() {
@@ -818,6 +880,83 @@ export class LocalSyncthing {
     );
   }
 
+  async folderPathConflicts(
+    path: string,
+    excludeFolderId?: string,
+    folders?: SyncthingFolderConfig[],
+  ) {
+    return this.folderPathConflictsFor(folders ?? (await this.folders()), path, excludeFolderId);
+  }
+
+  putFolderChecked(value: SyncthingFolderConfig) {
+    return this.mutateConfiguration(async () => {
+      const folders = await this.request<SyncthingFolderConfig[]>('/rest/config/folders');
+      const conflicts = await this.folderPathConflictsFor(folders, value.path, value.id);
+      if (conflicts.length) throw new FolderPathConflictError(conflicts);
+      await this.request<void>(`/rest/config/folders/${encodeURIComponent(value.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(value),
+      });
+    });
+  }
+
+  patchFolderPathChecked(id: string, path: string) {
+    return this.mutateConfiguration(async () => {
+      const folders = await this.request<SyncthingFolderConfig[]>('/rest/config/folders');
+      const conflicts = await this.folderPathConflictsFor(folders, path, id);
+      if (conflicts.length) throw new FolderPathConflictError(conflicts);
+      await this.request<void>(`/rest/config/folders/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ path }),
+      });
+    });
+  }
+
+  updateFolderChecked(id: string, value: Partial<SyncthingFolderConfig>) {
+    return this.mutateConfiguration(async () => {
+      const folders = await this.request<SyncthingFolderConfig[]>('/rest/config/folders');
+      if (value.path !== undefined) {
+        const conflicts = await this.folderPathConflictsFor(folders, value.path, id);
+        if (conflicts.length) throw new FolderPathConflictError(conflicts);
+      }
+      await this.request<void>(`/rest/config/folders/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(value),
+      });
+    });
+  }
+
+  shareFolderWithDevice(id: string, deviceId: string) {
+    return this.mutateConfiguration(async () => {
+      const folder = await this.request<SyncthingFolderConfig>(
+        `/rest/config/folders/${encodeURIComponent(id)}`,
+      );
+      const devices = [...(folder.devices ?? [])];
+      if (!devices.some((device) => device.deviceID === deviceId))
+        devices.push({ deviceID: deviceId });
+      await this.request<void>(`/rest/config/folders/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ devices }),
+      });
+    });
+  }
+
+  private async folderPathConflictsFor(
+    folders: SyncthingFolderConfig[],
+    path: string,
+    excludeFolderId?: string,
+  ) {
+    const output: SyncthingFolderPathConflict[] = [];
+    const candidate = await realFolderPath(path);
+    for (const folder of folders) {
+      if (folder.id === excludeFolderId) continue;
+      const relation = folderPathRelation(candidate, await realFolderPath(folder.path));
+      if (relation)
+        output.push({ folderId: folder.id, label: folder.label || folder.id, relation });
+    }
+    return output;
+  }
+
   patchFolder(id: string, value: Partial<SyncthingFolderConfig>) {
     return this.mutateConfiguration(() =>
       this.request<void>(`/rest/config/folders/${encodeURIComponent(id)}`, {
@@ -841,10 +980,28 @@ export class LocalSyncthing {
       localBytes?: number;
       globalBytes?: number;
       needBytes?: number;
+      needTotalItems?: number;
+      needDeletes?: number;
+      receiveOnlyChangedFiles?: number;
+      receiveOnlyChangedDirectories?: number;
+      receiveOnlyChangedSymlinks?: number;
+      receiveOnlyChangedDeletes?: number;
+      receiveOnlyChangedBytes?: number;
       error?: string;
       watchError?: string;
       errors?: number;
     }>(`/rest/db/status?folder=${encodeURIComponent(id)}`);
+  }
+
+  folderCompletion(deviceId: string, folderId: string) {
+    const query = new URLSearchParams({ device: deviceId, folder: folderId });
+    return this.request<{
+      completion?: number;
+      needBytes?: number;
+      needItems?: number;
+      needDeletes?: number;
+      remoteState?: 'unknown' | 'paused' | 'notSharing' | 'valid';
+    }>(`/rest/db/completion?${query}`);
   }
 
   scanFolder(id: string) {
@@ -855,6 +1012,40 @@ export class LocalSyncthing {
     return this.request<Record<string, SyncthingVersion[]>>(
       `/rest/folder/versions?folder=${encodeURIComponent(id)}`,
     );
+  }
+
+  folderIgnores(id: string) {
+    return this.request<{ ignore?: string[]; expanded?: string[] }>(
+      `/rest/db/ignores?folder=${encodeURIComponent(id)}`,
+    );
+  }
+
+  setFolderIgnores(id: string, lines: string[]) {
+    return this.request<void>(`/rest/db/ignores?folder=${encodeURIComponent(id)}`, {
+      method: 'POST',
+      body: JSON.stringify({ ignore: lines }),
+    });
+  }
+
+  folderErrors(id: string, page: number, perpage: number) {
+    const query = new URLSearchParams({ folder: id, page: String(page), perpage: String(perpage) });
+    return this.request<{
+      errors?: Array<{ path?: string; error?: string }>;
+      page?: number;
+      perpage?: number;
+    }>(`/rest/folder/errors?${query}`);
+  }
+
+  overrideFolder(id: string) {
+    return this.request<void>(`/rest/db/override?folder=${encodeURIComponent(id)}`, {
+      method: 'POST',
+    });
+  }
+
+  revertFolder(id: string) {
+    return this.request<void>(`/rest/db/revert?folder=${encodeURIComponent(id)}`, {
+      method: 'POST',
+    });
   }
 
   restoreVersion(id: string, path: string, versionTime: string) {

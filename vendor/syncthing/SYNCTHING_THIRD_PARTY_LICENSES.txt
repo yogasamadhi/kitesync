@@ -832,7 +832,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ==============================================================================
 Module: github.com/dustin/go-humanize@v1.0.1
 License expression: MIT
-Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
+Build targets: linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -2576,7 +2576,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ==============================================================================
 Module: github.com/mattn/go-isatty@v0.0.20
 License expression: MIT
-Build targets: darwin-amd64, darwin-arm64, windows-amd64
+Build targets: windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -2591,6 +2591,37 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+==============================================================================
+Module: github.com/mattn/go-sqlite3@v1.14.48
+License expression: MIT
+Build targets: darwin-amd64, darwin-arm64
+
+------------------------------------------------------------------------------
+File: LICENSE
+SHA-256: afa48e5e64dc610298d80b010ae7a3450f61a79500a9f1d1697ff6dcbbfa1f72
+------------------------------------------------------------------------------
+The MIT License (MIT)
+
+Copyright (c) 2014 Yasuhiro Matsumoto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ==============================================================================
 Module: github.com/miscreant/miscreant.go@v0.0.0-20200214223636-26d376326b75
@@ -2671,7 +2702,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ==============================================================================
 Module: github.com/ncruces/go-strftime@v1.0.0
 License expression: MIT
-Build targets: darwin-amd64, darwin-arm64, windows-amd64
+Build targets: windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -3810,7 +3841,7 @@ official policies, either expressed or implied, of Richard Crowley.
 ==============================================================================
 Module: github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec
 License expression: BSD-3-Clause
-Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
+Build targets: linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -4051,7 +4082,7 @@ SOFTWARE.
 ==============================================================================
 Module: github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465
 License expression: MIT
-Build targets: linux-amd64, linux-arm64, windows-amd64
+Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -5066,7 +5097,7 @@ limitations under the License.
 ==============================================================================
 Module: modernc.org/libc@v1.74.1
 License expression: BSD-3-Clause
-Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
+Build targets: linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -5413,7 +5444,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ==============================================================================
 Module: modernc.org/mathutil@v1.7.1
 License expression: BSD-3-Clause
-Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
+Build targets: linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -5450,7 +5481,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ==============================================================================
 Module: modernc.org/memory@v1.11.0
 License expression: BSD-3-Clause
-Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
+Build targets: linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE
@@ -5555,7 +5586,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ==============================================================================
 Module: modernc.org/sqlite@v1.54.0
 License expression: BSD-3-Clause
-Build targets: darwin-amd64, darwin-arm64, linux-amd64, linux-arm64, windows-amd64
+Build targets: linux-amd64, linux-arm64, windows-amd64
 
 ------------------------------------------------------------------------------
 File: LICENSE

@@ -722,11 +722,10 @@ describe('两个真实节点的静态地址同步', () => {
       45_000,
     );
     await writeFile(join(first.dataRoot, 'after-restart.txt'), 'resume-ok', 'utf8');
-    await first.syncthing.scanFolder(folder.id);
     await eventually(
       () => readFile(join(second.dataRoot, 'after-restart.txt'), 'utf8'),
       (contents) => contents === 'resume-ok',
-      '等待重启后的文件续传',
+      '等待 watcher 自动发现并续传重启后的文件',
       45_000,
     );
   }, 90_000);

@@ -23,7 +23,14 @@ const reviewedMetadata = {
   goSumSha256: '7e9606117eca33e9263181a3d0141e403c940c55022a061d8ed9e22d4bda2acd',
   goVersion: '1.26.0',
   sourceDateEpoch: 1785792965,
-  cgoEnabled: false,
+  macosDeploymentTarget: '13.0',
+  cgoByTarget: {
+    'darwin-arm64': true,
+    'darwin-x64': true,
+    'linux-arm64': false,
+    'linux-x64': false,
+    'win32-x64': false,
+  },
   buildTags: ['noupgrade', 'sqlite_omit_load_extension', 'sqlite_dbstat'],
 };
 
@@ -62,6 +69,7 @@ export function resolveSyncthingTarget(
   const directory = resolve(syncthingRoot, 'bin', key);
   return {
     ...target,
+    cgoEnabled: syncthingMetadata.cgoByTarget[key],
     key,
     platform,
     arch,
@@ -177,7 +185,10 @@ export function assertSyncthingBuild(target = resolveSyncthingTarget()) {
     sourceTree: syncthingMetadata.tree,
     platform: target.platform,
     arch: target.arch,
-    cgoEnabled: syncthingMetadata.cgoEnabled,
+    cgoEnabled: target.cgoEnabled,
+    ...(target.platform === 'darwin'
+      ? { macosDeploymentTarget: syncthingMetadata.macosDeploymentTarget }
+      : {}),
   };
   for (const [field, value] of Object.entries(expected)) {
     if (marker[field] !== value) {
@@ -210,6 +221,18 @@ export function assertSyncthingBuild(target = resolveSyncthingTarget()) {
       !version.includes('noupgrade')
     ) {
       throw new Error(`Unexpected Syncthing build identity: ${version.trim()}`);
+    }
+    if (target.platform === 'darwin') {
+      const loadCommands = execFileSync('otool', ['-l', target.binary], { encoding: 'utf8' });
+      if (
+        !new RegExp(
+          `\\bminos\\s+${syncthingMetadata.macosDeploymentTarget.replace('.', '\\.')}\\b`,
+        ).test(loadCommands)
+      ) {
+        throw new Error(
+          `Syncthing macOS deployment target must be ${syncthingMetadata.macosDeploymentTarget}`,
+        );
+      }
     }
   }
   return marker;

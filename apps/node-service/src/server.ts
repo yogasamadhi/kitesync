@@ -3,16 +3,22 @@ import {
   AcceptPendingDeviceRequestSchema,
   AcceptPendingFolderRequestSchema,
   AuthStatusSchema,
+  ChangePasswordRequestSchema,
   CreateDeviceRequestSchema,
   CreateFolderRequestSchema,
   DirectoryQuerySchema,
   FolderIdSchema,
   FolderFilesQuerySchema,
+  FolderIgnoreListSchema,
+  PagedFolderQuerySchema,
   LoginRequestSchema,
   OpenTokenLoginRequestSchema,
   RestoreVersionsRequestSchema,
+  ResetPasswordRequestSchema,
   RevealFileRequestSchema,
   SetupRequestSchema,
+  UpdateFolderIgnoresRequestSchema,
+  VersionListQuerySchema,
   UpdateDeviceRequestSchema,
   UpdateFolderRequestSchema,
   UpdateNodeSettingsSchema,
@@ -20,21 +26,27 @@ import {
   type AcceptPendingFolderRequest,
   type CreateDeviceRequest,
   type CreateFolderRequest,
+  type ChangePasswordRequest,
   type Device,
   type DirectoryQuery,
   type Folder,
+  type FolderErrorCode,
   type FolderFilesQuery,
+  type PagedFolderQuery,
   type FolderState,
   type LoginRequest,
   type NodeInfo,
   type NodeSettings,
   type OpenTokenLoginRequest,
   type RestoreVersionsRequest,
+  type ResetPasswordRequest,
   type RevealFileRequest,
   type SetupRequest,
   type UpdateFolderRequest,
+  type UpdateFolderIgnoresRequest,
   type UpdateDeviceRequest,
   type UpdateNodeSettings,
+  type VersionListQuery,
 } from '@kitesync/contracts';
 import { Type } from '@sinclair/typebox';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -45,10 +57,14 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import type { NodeConfig } from './config.js';
 import { DirectoryBrowser, isWithinRoot } from './directory-browser.js';
+import { DiagnosticLog } from './diagnostic-log.js';
 import { embeddedWebAssets } from './embedded-web-assets.js';
 import { FolderFiles, safeRelativePath } from './folder-files.js';
+import { restoreFolderMarker } from './folder-marker.js';
+import { pickNativeDirectory, supportsNativeDirectoryPicker } from './native-directory-picker.js';
 import type { StateStore, StoredNodeSettings } from './state-store.js';
 import {
+  FolderPathConflictError,
   LocalSyncthing,
   type SyncthingDeviceConfig,
   type SyncthingFolderConfig,
@@ -63,6 +79,7 @@ interface Session {
   csrfToken: string;
   expiresAt: number;
   desktop: boolean;
+  authGeneration: number;
 }
 
 interface LoginAttempt {
@@ -83,6 +100,9 @@ export interface ServerRuntime {
   openTokens: Map<string, number>;
   loginAttempts: Map<string, LoginAttempt>;
   passwordOperations: { active: number; waiters: Array<() => void> };
+  authGeneration: number;
+  settingsMutationQueue: Promise<void>;
+  lastNodeInfo?: NodeInfo;
 }
 
 export interface PasswordHasher {
@@ -98,9 +118,11 @@ export interface CreateServerOptions {
   runtime?: ServerRuntime;
   directories?: DirectoryBrowser;
   files?: FolderFiles;
+  pickDirectory?: () => Promise<string | undefined>;
   passwordHasher?: PasswordHasher;
   onRebindRequested?: () => void;
   sleep?: (milliseconds: number) => Promise<void>;
+  diagnostics?: DiagnosticLog;
 }
 
 class HttpError extends Error {
@@ -120,6 +142,8 @@ export function createServerRuntime(): ServerRuntime {
     openTokens: new Map(),
     loginAttempts: new Map(),
     passwordOperations: { active: 0, waiters: [] },
+    authGeneration: 0,
+    settingsMutationQueue: Promise.resolve(),
   };
 }
 
@@ -439,6 +463,101 @@ function folderState(value: string | undefined, paused: boolean, failed = false)
   return 'idle';
 }
 
+interface FolderStatus {
+  state?: string;
+  localBytes?: number;
+  globalBytes?: number;
+  needBytes?: number;
+  needTotalItems?: number;
+  needDeletes?: number;
+  receiveOnlyChangedFiles?: number;
+  receiveOnlyChangedDirectories?: number;
+  receiveOnlyChangedSymlinks?: number;
+  receiveOnlyChangedDeletes?: number;
+  receiveOnlyChangedBytes?: number;
+  rescanIntervalS?: number;
+  error?: string;
+  watchError?: string;
+  errors?: number;
+}
+
+function folderProblem(status: FolderStatus): {
+  errorCode: FolderErrorCode | null;
+  error: string | null;
+  errorCount: number;
+} {
+  const errorCount = Math.max(0, Math.floor(status.errors ?? 0));
+  const error = status.error ?? '';
+  if (/folder marker missing/i.test(error)) {
+    return {
+      errorCode: 'marker_missing',
+      error:
+        '同步安全标记已丢失。请先确认这里仍是原来的同步目录；如果是外接磁盘或网络目录，请先重新连接。确认文件完整后再恢复同步。',
+      errorCount,
+    };
+  }
+  if (
+    /folder path missing|path missing|no such file or directory|cannot find the path/i.test(error)
+  ) {
+    return {
+      errorCode: 'path_missing',
+      error:
+        '本机同步目录不存在或当前不可访问。请重新连接磁盘或网络目录；如果目录已经移动，请暂停文件夹，在设置中选择新位置并确认内容完整。',
+      errorCount,
+    };
+  }
+  if (/permission denied|access is denied|operation not permitted/i.test(error)) {
+    return {
+      errorCode: 'access_denied',
+      error: 'KiteSync 没有访问同步目录的权限。请在系统设置中授予磁盘或文件夹权限，然后重新扫描。',
+      errorCount,
+    };
+  }
+  if (/no space left|disk full|not enough space/i.test(error)) {
+    return {
+      errorCode: 'disk_full',
+      error: '同步目录所在磁盘空间不足。请释放空间，然后重新扫描。',
+      errorCount,
+    };
+  }
+  if (status.watchError) {
+    const interval = Math.max(0, Math.floor(status.rescanIntervalS ?? 0));
+    const scanAdvice = interval
+      ? `系统仍会每 ${interval} 秒定时扫描；可用“重新扫描”立即检查。`
+      : '请设置定时扫描间隔，或用“重新扫描”立即检查。';
+    return {
+      errorCode: 'watch_failed',
+      error: /not supported|不支持/i.test(status.watchError)
+        ? `当前 Syncthing 构建或文件系统不支持实时监视。${scanAdvice}`
+        : `实时监视失败：${status.watchError.slice(0, 240)}。${scanAdvice}`,
+      errorCount,
+    };
+  }
+  if (errorCount > 0) {
+    return {
+      errorCode: 'file_errors',
+      error: `有 ${errorCount} 个项目无法同步。请检查文件占用、读写权限、文件名和磁盘空间，然后重新扫描。`,
+      errorCount,
+    };
+  }
+  if (error === '无法读取同步状态') {
+    return {
+      errorCode: 'status_unavailable',
+      error: '暂时无法读取 Syncthing 状态。请刷新页面；如果仍然出现，请重新启动 KiteSync。',
+      errorCount,
+    };
+  }
+  if (error || status.state === 'error' || status.state === 'stopped') {
+    return {
+      errorCode: 'unknown',
+      error:
+        'Syncthing 无法运行此文件夹。请确认目录存在、存储设备已连接且 KiteSync 有读写权限，然后重新扫描。',
+      errorCount,
+    };
+  }
+  return { errorCode: null, error: null, errorCount: 0 };
+}
+
 function normalizeAllowedOrigins(values: string[]) {
   const result = values.map((value) => {
     let parsed: URL;
@@ -515,6 +634,10 @@ async function currentSettings(
 ): Promise<NodeSettings> {
   const identity = await syncthing.identity();
   return { ...currentPreferences(config, store), nodeName: identity.nodeName };
+}
+
+function settingsEtag(settings: NodeSettings) {
+  return `"${createHash('sha256').update(JSON.stringify(settings)).digest('base64url')}"`;
 }
 
 export async function applyAdminPassword(
@@ -602,6 +725,30 @@ function requestRelativePath(value: string, allowRoot = true) {
   }
 }
 
+function decodeOffsetCursor(value: string | undefined, scope: string) {
+  if (!value) return 0;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as {
+      scope?: string;
+      offset?: number;
+    };
+    if (
+      parsed.scope !== scope ||
+      !Number.isSafeInteger(parsed.offset) ||
+      (parsed.offset ?? -1) < 0
+    ) {
+      throw new Error('invalid');
+    }
+    return parsed.offset as number;
+  } catch {
+    throw new HttpError(400, 'cursor_expired', '分页游标无效或已过期，请重新加载');
+  }
+}
+
+function encodeOffsetCursor(scope: string, offset: number) {
+  return Buffer.from(JSON.stringify({ scope, offset }), 'utf8').toString('base64url');
+}
+
 async function webAsset(config: NodeConfig, requestPath: string) {
   let decoded: string;
   try {
@@ -644,10 +791,35 @@ export async function createServer(options: CreateServerOptions) {
   const runtime = options.runtime ?? createServerRuntime();
   const directories = options.directories ?? new DirectoryBrowser(config.directoryRoots);
   const files = options.files ?? new FolderFiles();
+  const diagnostics = options.diagnostics ?? new DiagnosticLog();
+  const optionalSyncthing = syncthing as unknown as {
+    folderPathConflicts?: LocalSyncthing['folderPathConflicts'];
+    folderCompletion?: LocalSyncthing['folderCompletion'];
+    folderStats?: LocalSyncthing['folderStats'];
+    putFolderChecked?: LocalSyncthing['putFolderChecked'];
+    updateFolderChecked?: LocalSyncthing['updateFolderChecked'];
+    shareFolderWithDevice?: LocalSyncthing['shareFolderWithDevice'];
+    folder?: LocalSyncthing['folder'];
+  };
+  const nativeDirectoryPicker =
+    options.pickDirectory ??
+    (supportsNativeDirectoryPicker() ? () => pickNativeDirectory() : undefined);
   const requestSessions = new WeakMap<FastifyRequest, Session>();
   const requestContexts = new WeakMap<FastifyRequest, RequestContext>();
+  let directoryPickerActive = false;
   const app = Fastify({ logger: false, trustProxy: false });
   await app.register(cookie);
+
+  async function settingsSnapshot(): Promise<NodeSettings> {
+    try {
+      return await currentSettings(config, store, syncthing);
+    } catch {
+      return {
+        ...currentPreferences(config, store),
+        nodeName: runtime.lastNodeInfo?.name ?? 'KiteSync 节点',
+      };
+    }
+  }
 
   async function acquirePasswordVerification() {
     if (runtime.passwordOperations.active < 2) {
@@ -676,7 +848,15 @@ export async function createServer(options: CreateServerOptions) {
     return session;
   }
 
-  function createSession(request: FastifyRequest, reply: FastifyReply, desktop: boolean) {
+  function createSession(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    desktop: boolean,
+    expectedAuthGeneration = runtime.authGeneration,
+  ) {
+    if (expectedAuthGeneration !== runtime.authGeneration) {
+      throw new HttpError(401, 'credentials_changed', '密码已变更，请使用新密码登录');
+    }
     while (runtime.sessions.size >= 256) {
       const oldest = runtime.sessions.keys().next().value as string | undefined;
       if (!oldest) break;
@@ -687,6 +867,7 @@ export async function createServer(options: CreateServerOptions) {
       csrfToken: randomBytes(24).toString('base64url'),
       expiresAt: Date.now() + SESSION_TTL_MS,
       desktop,
+      authGeneration: runtime.authGeneration,
     };
     runtime.sessions.set(token, session);
     reply.setCookie(SESSION_COOKIE, token, {
@@ -758,18 +939,20 @@ export async function createServer(options: CreateServerOptions) {
       }
       reply.header('Access-Control-Allow-Origin', origin);
       reply.header('Access-Control-Allow-Credentials', 'true');
+      reply.header('Access-Control-Expose-Headers', 'ETag');
       reply.header('Vary', 'Origin');
     }
     if (request.method === 'OPTIONS') {
-      reply.header('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token');
-      reply.header('Access-Control-Allow-Methods', 'GET, HEAD, POST, PATCH, DELETE, OPTIONS');
+      reply.header('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, If-Match');
+      reply.header('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
       return reply.status(204).send();
     }
 
     const now = Date.now();
     const sessionToken = request.cookies[SESSION_COOKIE];
     const session = sessionToken ? runtime.sessions.get(sessionToken) : undefined;
-    if (session && session.expiresAt > now) requestSessions.set(request, session);
+    if (session && session.expiresAt > now && session.authGeneration === runtime.authGeneration)
+      requestSessions.set(request, session);
     else if (sessionToken) runtime.sessions.delete(sessionToken);
 
     if (path.startsWith('/api/') && !publicApi(path)) {
@@ -800,28 +983,46 @@ export async function createServer(options: CreateServerOptions) {
   });
 
   app.setErrorHandler((error, request, reply) => {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    diagnostics.write(
+      error instanceof HttpError && error.statusCode < 500 ? 'warn' : 'error',
+      `${request.method} ${request.url.split('?')[0]}：${errorMessage}`,
+    );
     const fastifyError = error as {
       statusCode?: number;
       message?: string;
       validation?: Array<{ instancePath?: string; message?: string }>;
     };
+    const recoverableCode = /目录句柄无效或已过期/.test(errorMessage)
+      ? 'directory_handle_expired'
+      : /分页游标无效或已过期/.test(errorMessage)
+        ? 'cursor_expired'
+        : undefined;
     const status =
       error instanceof HttpError
         ? error.statusCode
-        : typeof fastifyError.statusCode === 'number' && fastifyError.statusCode >= 400
-          ? fastifyError.statusCode
-          : 500;
+        : recoverableCode
+          ? 410
+          : typeof fastifyError.statusCode === 'number' && fastifyError.statusCode >= 400
+            ? fastifyError.statusCode
+            : 500;
     const validation = Array.isArray(fastifyError.validation) ? fastifyError.validation : undefined;
     const code =
       error instanceof HttpError
         ? error.code
-        : validation
-          ? 'validation_error'
-          : status === 404
-            ? 'not_found'
-            : 'internal_error';
+        : recoverableCode
+          ? recoverableCode
+          : validation
+            ? 'validation_error'
+            : status === 404
+              ? 'not_found'
+              : 'internal_error';
     const detail =
-      status >= 500 ? '节点服务处理请求时发生错误' : (fastifyError.message ?? '请求无效');
+      status >= 500
+        ? '节点服务处理请求时发生错误'
+        : recoverableCode
+          ? `${fastifyError.message ?? '选择已过期'}，请重新选择或重新加载`
+          : (fastifyError.message ?? '请求无效');
     void reply.status(status).send({
       type: 'about:blank',
       title: status >= 500 ? '节点服务错误' : '请求失败',
@@ -912,6 +1113,7 @@ export async function createServer(options: CreateServerOptions) {
         throw new HttpError(429, 'login_rate_limited', '登录尝试过多，请稍后再试');
       const hash = store.snapshot().passwordHash;
       if (!hash) throw new HttpError(409, 'setup_required', '请先设置管理员密码');
+      const authGeneration = runtime.authGeneration;
       // Reserve the failure budget before the expensive Argon2 operation. JavaScript runs this
       // section synchronously, so parallel requests from one client cannot all observe zero.
       attempt.failures += 1;
@@ -929,7 +1131,11 @@ export async function createServer(options: CreateServerOptions) {
       } finally {
         releaseVerification();
       }
-      if (!verified) {
+      if (
+        !verified ||
+        authGeneration !== runtime.authGeneration ||
+        store.snapshot().passwordHash !== hash
+      ) {
         await sleep(Math.min(250 * 2 ** (failureNumber - 1), 4_000));
         throw new HttpError(401, 'invalid_credentials', '密码不正确');
       }
@@ -938,6 +1144,7 @@ export async function createServer(options: CreateServerOptions) {
         request,
         reply,
         !config.headless && isLoopbackAddress(requestContexts.get(request)?.clientAddress),
+        authGeneration,
       );
     },
   );
@@ -1000,72 +1207,277 @@ export async function createServer(options: CreateServerOptions) {
     return { message: '已退出登录' };
   });
 
+  async function replacePassword(newPassword: string, expectedHash?: string) {
+    const hash = await passwordHasher.hash(newPassword);
+    await store.update((draft) => {
+      if (expectedHash !== undefined && draft.passwordHash !== expectedHash) {
+        throw new HttpError(401, 'invalid_current_password', '当前密码不正确或已经变更');
+      }
+      draft.passwordHash = hash;
+    });
+    runtime.authGeneration += 1;
+    runtime.sessions.clear();
+    runtime.openTokens.clear();
+    runtime.loginAttempts.clear();
+    diagnostics.write('info', '管理员密码已更新，旧会话和打开令牌已撤销');
+  }
+
+  app.post<{ Body: ChangePasswordRequest }>(
+    '/api/v1/auth/password',
+    { schema: { body: ChangePasswordRequestSchema } },
+    async (request, reply) => {
+      authenticated(request);
+      const key = `password:${requestContexts.get(request)?.clientAddress ?? canonicalIp(request.socket.remoteAddress)}`;
+      const now = Date.now();
+      const existingAttempt = runtime.loginAttempts.get(key);
+      const attempt =
+        !existingAttempt || existingAttempt.resetAt <= now
+          ? { failures: 0, resetAt: now + 15 * 60_000 }
+          : existingAttempt;
+      if (attempt.failures >= 5) {
+        throw new HttpError(429, 'password_change_rate_limited', '密码验证尝试过多，请稍后再试');
+      }
+      attempt.failures += 1;
+      runtime.loginAttempts.set(key, attempt);
+      const currentHash = store.snapshot().passwordHash;
+      if (!currentHash) throw new HttpError(409, 'setup_required', '请先设置管理员密码');
+      const authGeneration = runtime.authGeneration;
+      const release = await acquirePasswordVerification();
+      let verified = false;
+      try {
+        verified = await passwordHasher.verify(request.body.currentPassword, currentHash);
+      } finally {
+        release();
+      }
+      if (
+        !verified ||
+        authGeneration !== runtime.authGeneration ||
+        store.snapshot().passwordHash !== currentHash
+      ) {
+        await sleep(Math.min(250 * 2 ** (attempt.failures - 1), 4_000));
+        throw new HttpError(401, 'invalid_current_password', '当前密码不正确或已经变更');
+      }
+      runtime.loginAttempts.delete(key);
+      await replacePassword(request.body.newPassword, currentHash);
+      reply.clearCookie(SESSION_COOKIE, {
+        path: '/',
+        secure: requestContexts.get(request)?.protocol === 'https',
+      });
+      return { message: '密码已修改，请重新登录' };
+    },
+  );
+
+  app.post<{ Body: ResetPasswordRequest }>(
+    '/internal/password-reset',
+    { schema: { body: ResetPasswordRequestSchema } },
+    async (request) => {
+      const header = request.headers['x-kitesync-open-secret'];
+      const supplied = Array.isArray(header) ? header[0] : header;
+      if (!supplied || !secretEqual(supplied, openSecret)) {
+        throw new HttpError(401, 'invalid_open_secret', '本机恢复凭据无效');
+      }
+      await replacePassword(request.body.newPassword);
+      return { message: '密码已重置，全部旧会话已撤销' };
+    },
+  );
+
   app.get('/api/v1/node', async (request): Promise<NodeInfo> => {
     const session = authenticated(request);
-    const [identity, connections] = await Promise.all([
-      syncthing.identity(),
-      syncthing.connections(),
-    ]);
+    try {
+      const [identity, connections] = await Promise.all([
+        syncthing.identity(),
+        syncthing.connections(),
+      ]);
+      const result: NodeInfo = {
+        deviceId: identity.deviceId,
+        fingerprint: identity.deviceId.replaceAll('-', '').slice(0, 12),
+        name: identity.nodeName,
+        platform: platform(),
+        version: config.version,
+        syncthingVersion: identity.syncthingVersion,
+        startedAt: runtime.startedAt,
+        setupRequired: !store.snapshot().passwordHash,
+        listenAddresses: identity.listenAddresses,
+        localDiscoveryEnabled: identity.localDiscoveryEnabled,
+        connectedPeers: Object.values(connections.connections).filter((item) => item.connected)
+          .length,
+        canRevealFiles: session.desktop && !config.headless,
+        canPickDirectories: session.desktop && !config.headless && Boolean(nativeDirectoryPicker),
+        engineStatus: 'ok',
+        statusUpdatedAt: new Date().toISOString(),
+      };
+      runtime.lastNodeInfo = result;
+      return result;
+    } catch (error) {
+      if (!runtime.lastNodeInfo) throw error;
+      return {
+        ...runtime.lastNodeInfo,
+        connectedPeers: 0,
+        canRevealFiles: session.desktop && !config.headless,
+        canPickDirectories: session.desktop && !config.headless && Boolean(nativeDirectoryPicker),
+        engineStatus: 'unavailable',
+        engineError: 'Syncthing 暂时不可用，KiteSync 正在尝试重新连接',
+      };
+    }
+  });
+
+  async function diagnosticSummary() {
+    const generatedAt = new Date().toISOString();
+    const [identityResult, foldersResult, devicesResult, connectionsResult] =
+      await Promise.allSettled([
+        syncthing.identity(),
+        syncthing.folders(),
+        syncthing.devices(),
+        syncthing.connections(),
+      ]);
+    const identity = identityResult.status === 'fulfilled' ? identityResult.value : undefined;
+    const folders = foldersResult.status === 'fulfilled' ? foldersResult.value : [];
+    const devices = devicesResult.status === 'fulfilled' ? devicesResult.value : [];
+    const connections =
+      connectionsResult.status === 'fulfilled' ? connectionsResult.value.connections : {};
+    const folderStatuses = await Promise.all(
+      folders.map((folder) => syncthing.folderStatus(folder.id).catch(() => ({ state: 'error' }))),
+    );
+    const problems = [
+      ...(identityResult.status === 'rejected' ? ['同步引擎当前不可用'] : []),
+      ...folderStatuses.flatMap((status, index) => {
+        const problem = folderProblem({
+          ...status,
+          ...(folders[index]?.rescanIntervalS === undefined
+            ? {}
+            : { rescanIntervalS: folders[index]?.rescanIntervalS }),
+        });
+        return problem.error
+          ? [`${folders[index]?.label || folders[index]?.id}：${problem.error}`]
+          : [];
+      }),
+    ];
     return {
-      deviceId: identity.deviceId,
-      fingerprint: identity.deviceId.replaceAll('-', '').slice(0, 12),
-      name: identity.nodeName,
-      platform: platform(),
-      version: config.version,
-      syncthingVersion: identity.syncthingVersion,
-      startedAt: runtime.startedAt,
-      setupRequired: !store.snapshot().passwordHash,
-      listenAddresses: identity.listenAddresses,
-      localDiscoveryEnabled: identity.localDiscoveryEnabled,
-      connectedPeers: Object.values(connections.connections).filter((item) => item.connected)
-        .length,
-      canRevealFiles: session.desktop && !config.headless,
+      generatedAt,
+      node: {
+        name: identity?.nodeName || 'KiteSync 节点',
+        platform: platform(),
+        version: config.version,
+        uptimeSeconds: Math.max(
+          0,
+          Math.floor((Date.now() - Date.parse(runtime.startedAt)) / 1_000),
+        ),
+      },
+      engine: {
+        available: Boolean(identity),
+        version: identity?.syncthingVersion ?? null,
+      },
+      counts: {
+        folders: folders.length,
+        devices: Math.max(0, devices.length - (identity ? 1 : 0)),
+        connectedDevices: Object.values(connections).filter((value) => value.connected).length,
+        folderErrors: folderStatuses.filter((status) => folderProblem(status).errorCode !== null)
+          .length,
+      },
+      problems: problems.slice(0, 100),
+    };
+  }
+
+  app.get<{ Querystring: PagedFolderQuery }>(
+    '/api/v1/diagnostics/logs',
+    { schema: { querystring: PagedFolderQuerySchema } },
+    async (request) => {
+      const offset = request.query.cursor ? Number.parseInt(request.query.cursor, 10) : 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw new HttpError(400, 'cursor_expired', '日志分页游标无效，请重新加载');
+      }
+      return diagnostics.recent(request.query.limit ?? 50, offset);
+    },
+  );
+  app.get('/api/v1/diagnostics/summary', diagnosticSummary);
+  app.get('/api/v1/diagnostics/export', async (_request, reply) => {
+    const summary = await diagnosticSummary();
+    const logs = await diagnostics.recent(100);
+    reply.header('Content-Type', 'application/json; charset=utf-8');
+    reply.header('Content-Disposition', 'attachment; filename="kitesync-diagnostics.json"');
+    return {
+      schemaVersion: 1,
+      summary: {
+        ...summary,
+        node: { ...summary.node, name: 'KiteSync 节点' },
+        problems: summary.problems.map(() => '检测到文件夹或同步引擎问题'),
+      },
+      logs: logs.items,
     };
   });
 
-  app.get('/api/v1/settings', async () => currentSettings(config, store, syncthing));
+  app.get('/api/v1/settings', async (_request, reply) => {
+    const settings = await settingsSnapshot();
+    reply.header('ETag', settingsEtag(settings));
+    return settings;
+  });
   app.patch<{ Body: UpdateNodeSettings }>(
     '/api/v1/settings',
     { schema: { body: UpdateNodeSettingsSchema } },
     async (request, reply) => {
-      const before = currentPreferences(config, store).lanAccessEnabled;
-      const { nodeName, lanAccessEnabled, ...otherPreferences } = request.body;
-      if (
-        config.hostOverride !== undefined &&
-        lanAccessEnabled !== undefined &&
-        lanAccessEnabled !== effectiveLanAccess(config, { lanAccessEnabled: false })
-      ) {
-        throw new HttpError(
-          409,
-          'listen_override_active',
-          'KITESYNC_UI_HOST 已固定管理界面监听范围，不能从界面修改',
-        );
-      }
-      // The settings form posts its complete current value. When an environment override is
-      // active, accept the matching effective value but do not persist it as misleading state.
-      const preferences = {
-        ...otherPreferences,
-        ...(config.hostOverride === undefined && lanAccessEnabled !== undefined
-          ? { lanAccessEnabled }
-          : {}),
-      };
-      if (preferences.allowedOrigins) {
-        preferences.allowedOrigins = normalizeAllowedOrigins(preferences.allowedOrigins);
-      }
-      if (preferences.trustedProxies) {
-        preferences.trustedProxies = normalizeTrustedProxies(preferences.trustedProxies);
-      }
-      if (Object.keys(preferences).length) {
-        await store.update((draft) => {
-          draft.settings = { ...draft.settings, ...preferences };
-        });
-      }
-      if (nodeName) await syncthing.setNodeName(nodeName);
-      const after = await currentSettings(config, store, syncthing);
-      if (before !== after.lanAccessEnabled && !config.hostOverride && onRebindRequested) {
-        reply.raw.once('finish', onRebindRequested);
-      }
-      return after;
+      let result: NodeSettings | undefined;
+      const operation = runtime.settingsMutationQueue.then(async () => {
+        const current = await settingsSnapshot();
+        const supplied = request.headers['if-match'];
+        const ifMatch = Array.isArray(supplied) ? supplied[0] : supplied;
+        if (ifMatch && ifMatch !== '*' && ifMatch !== settingsEtag(current)) {
+          throw new HttpError(
+            412,
+            'settings_version_conflict',
+            '设置已在其他页面发生变化，请重新加载后核对草稿',
+          );
+        }
+        const before = currentPreferences(config, store).lanAccessEnabled;
+        const { nodeName, lanAccessEnabled, ...otherPreferences } = request.body;
+        if (
+          config.hostOverride !== undefined &&
+          lanAccessEnabled !== undefined &&
+          lanAccessEnabled !== effectiveLanAccess(config, { lanAccessEnabled: false })
+        ) {
+          throw new HttpError(
+            409,
+            'listen_override_active',
+            'KITESYNC_UI_HOST 已固定管理界面监听范围，不能从界面修改',
+          );
+        }
+        // An environment override owns the effective LAN value, so partial UI updates must not
+        // persist a conflicting preference underneath it.
+        const preferences = {
+          ...otherPreferences,
+          ...(config.hostOverride === undefined && lanAccessEnabled !== undefined
+            ? { lanAccessEnabled }
+            : {}),
+        };
+        if (preferences.allowedOrigins) {
+          preferences.allowedOrigins = normalizeAllowedOrigins(preferences.allowedOrigins);
+        }
+        if (preferences.trustedProxies) {
+          preferences.trustedProxies = normalizeTrustedProxies(preferences.trustedProxies);
+        }
+        if (nodeName) {
+          await syncthing.setNodeName(nodeName);
+          if (runtime.lastNodeInfo)
+            runtime.lastNodeInfo = { ...runtime.lastNodeInfo, name: nodeName };
+        }
+        if (Object.keys(preferences).length) {
+          await store.update((draft) => {
+            draft.settings = { ...draft.settings, ...preferences };
+          });
+        }
+        const after = await settingsSnapshot();
+        reply.header('ETag', settingsEtag(after));
+        if (before !== after.lanAccessEnabled && !config.hostOverride && onRebindRequested) {
+          reply.raw.once('finish', onRebindRequested);
+        }
+        result = after;
+        diagnostics.write('info', '节点设置已更新');
+      });
+      runtime.settingsMutationQueue = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      await operation;
+      return result as NodeSettings;
     },
   );
 
@@ -1095,38 +1507,80 @@ export async function createServer(options: CreateServerOptions) {
     };
   }
 
-  async function folderView(value: SyncthingFolderConfig): Promise<Folder> {
-    const [status, identity] = await Promise.all([
-      syncthing.folderStatus(value.id).catch(
-        (): {
-          state?: string;
-          localBytes?: number;
-          globalBytes?: number;
-          needBytes?: number;
-          error?: string;
-          watchError?: string;
-          errors?: number;
-        } => ({ state: 'error', error: '无法读取同步状态' }),
-      ),
+  async function folderView(
+    value: SyncthingFolderConfig,
+    configuredFolders?: SyncthingFolderConfig[],
+    folderStats?: Awaited<ReturnType<LocalSyncthing['folderStats']>>,
+  ): Promise<Folder> {
+    const [rawStatus, identity, pathConflicts] = await Promise.all([
+      syncthing
+        .folderStatus(value.id)
+        .catch((): FolderStatus => ({ state: 'error', error: '无法读取同步状态' })),
       syncthing.status(),
+      optionalSyncthing.folderPathConflicts?.(value.path, value.id, configuredFolders) ?? [],
     ]);
+    const status = {
+      ...rawStatus,
+      ...(value.rescanIntervalS === undefined ? {} : { rescanIntervalS: value.rescanIntervalS }),
+    };
+    const remoteDeviceIds = (value.devices ?? [])
+      .map((device) => device.deviceID)
+      .filter((id) => id !== identity.myID);
+    const completionResults = optionalSyncthing.folderCompletion
+      ? await Promise.allSettled(
+          remoteDeviceIds.map(async (deviceId) => ({
+            deviceId,
+            ...(await optionalSyncthing.folderCompletion?.(deviceId, value.id)),
+          })),
+        )
+      : [];
     const pathLabel = (basename(value.path) || value.label || '同步目录').slice(0, 255);
-    const failed = Boolean(status.error || status.watchError || (status.errors ?? 0) > 0);
-    const safeError = failed ? 'Syncthing 报告扫描、监视或同步错误' : null;
+    const problem = folderProblem(status);
     return {
       id: value.id,
       label: (value.label || value.id).slice(0, 128),
       pathLabel,
       type: value.type ?? 'sendreceive',
       paused: value.paused === true,
-      deviceIds: (value.devices ?? [])
-        .map((device) => device.deviceID)
-        .filter((id) => id !== identity.myID),
-      state: folderState(status.state, value.paused === true, failed),
+      deviceIds: remoteDeviceIds,
+      state: folderState(status.state, value.paused === true, problem.errorCode !== null),
       localBytes: Math.max(0, Math.floor(status.localBytes ?? 0)),
       globalBytes: Math.max(0, Math.floor(status.globalBytes ?? 0)),
       needBytes: Math.max(0, Math.floor(status.needBytes ?? 0)),
-      error: safeError,
+      needItems: Math.max(0, Math.floor(status.needTotalItems ?? 0)),
+      needDeletes: Math.max(0, Math.floor(status.needDeletes ?? 0)),
+      receiveOnlyChangedItems: Math.max(
+        0,
+        Math.floor(status.receiveOnlyChangedFiles ?? 0) +
+          Math.floor(status.receiveOnlyChangedDirectories ?? 0) +
+          Math.floor(status.receiveOnlyChangedSymlinks ?? 0) +
+          Math.floor(status.receiveOnlyChangedDeletes ?? 0),
+      ),
+      receiveOnlyChangedBytes: Math.max(0, Math.floor(status.receiveOnlyChangedBytes ?? 0)),
+      peerProgress: completionResults.flatMap((result) =>
+        result.status === 'fulfilled'
+          ? [
+              {
+                deviceId: result.value.deviceId,
+                completion: Math.max(0, Math.min(100, result.value.completion ?? 0)),
+                needBytes: Math.max(0, Math.floor(result.value.needBytes ?? 0)),
+                needItems: Math.max(0, Math.floor(result.value.needItems ?? 0)),
+                needDeletes: Math.max(0, Math.floor(result.value.needDeletes ?? 0)),
+                remoteState: ['paused', 'notSharing', 'valid'].includes(
+                  result.value.remoteState ?? '',
+                )
+                  ? (result.value.remoteState as 'paused' | 'notSharing' | 'valid')
+                  : ('unknown' as const),
+              },
+            ]
+          : [],
+      ),
+      pathConflicts,
+      rescanIntervalSeconds: Math.max(0, Math.floor(value.rescanIntervalS ?? 0)),
+      ...(optionalDate(folderStats?.[value.id]?.lastFile?.at)
+        ? { lastCompletedAt: optionalDate(folderStats?.[value.id]?.lastFile?.at) as string }
+        : {}),
+      ...problem,
       versioningDays: versioningDays(value),
     };
   }
@@ -1137,6 +1591,18 @@ export async function createServer(options: CreateServerOptions) {
     deviceId: Type.String({ minLength: 32, maxLength: 80 }),
     folderId: FolderIdSchema,
   });
+
+  function folderPathFailure(error: unknown): never {
+    if (error instanceof FolderPathConflictError) {
+      const names = error.conflicts.map((item) => item.label).join('、');
+      throw new HttpError(
+        409,
+        'folder_path_conflict',
+        `所选目录与已有文件夹“${names}”相同或存在父子目录关系，请改选目录或先修正已有配置`,
+      );
+    }
+    throw error;
+  }
 
   async function folderDevices(
     deviceIds: string[],
@@ -1345,9 +1811,17 @@ export async function createServer(options: CreateServerOptions) {
     },
   );
 
-  app.get('/api/v1/folders', async () => ({
-    items: await Promise.all((await syncthing.folders()).map(folderView)),
-  }));
+  app.get('/api/v1/folders', async () => {
+    const [configuredFolders, folderStats] = await Promise.all([
+      syncthing.folders(),
+      optionalSyncthing.folderStats?.() ?? {},
+    ]);
+    return {
+      items: await Promise.all(
+        configuredFolders.map((folder) => folderView(folder, configuredFolders, folderStats)),
+      ),
+    };
+  });
 
   app.post<{ Body: CreateFolderRequest }>(
     '/api/v1/folders',
@@ -1357,7 +1831,7 @@ export async function createServer(options: CreateServerOptions) {
       const id = `folder-${randomUUID().replaceAll('-', '').slice(0, 20)}`;
       const days = currentPreferences(config, store).versioningDays;
       const devices = await folderDevices(request.body.deviceIds ?? []);
-      await syncthing.putFolder({
+      const configuration = {
         id,
         label: request.body.label,
         path: selection.path,
@@ -1365,7 +1839,13 @@ export async function createServer(options: CreateServerOptions) {
         paused: false,
         devices,
         versioning: versioning(days),
-      });
+      };
+      await (
+        optionalSyncthing.putFolderChecked
+          ? optionalSyncthing.putFolderChecked(configuration)
+          : syncthing.putFolder(configuration)
+      ).catch(folderPathFailure);
+      diagnostics.write('info', '已添加同步文件夹配置');
       return folderView(await syncthing.folder(id));
     },
   );
@@ -1375,18 +1855,43 @@ export async function createServer(options: CreateServerOptions) {
     { schema: { params: FolderParamsSchema, body: UpdateFolderRequestSchema } },
     async (request) => {
       const current = await syncthing.folder(request.params.id);
+      let selectedPath: string | undefined;
+      if (request.body.directoryId !== undefined) {
+        if (current.paused !== true) {
+          throw new HttpError(
+            409,
+            'folder_must_be_paused_for_move',
+            '修改目录位置前请先暂停文件夹，并手动移动或核对文件内容',
+          );
+        }
+        if (request.body.confirmDirectoryMove !== true) {
+          throw new HttpError(
+            400,
+            'folder_move_confirmation_required',
+            '请确认新目录内容完整；KiteSync 只更新配置，不会移动或覆盖文件',
+          );
+        }
+        selectedPath = (await directories.resolveSelection(request.body.directoryId)).path;
+      }
       const devices =
         request.body.deviceIds === undefined
           ? undefined
           : await folderDevices(request.body.deviceIds, current.devices);
-      await syncthing.patchFolder(request.params.id, {
+      const update = {
         ...(request.body.label === undefined ? {} : { label: request.body.label }),
         ...(request.body.type === undefined ? {} : { type: request.body.type }),
         ...(devices === undefined ? {} : { devices }),
         ...(request.body.versioningDays === undefined
           ? {}
           : { versioning: versioning(request.body.versioningDays) }),
-      });
+        ...(selectedPath === undefined ? {} : { path: selectedPath }),
+      };
+      await (
+        optionalSyncthing.updateFolderChecked
+          ? optionalSyncthing.updateFolderChecked(request.params.id, update)
+          : syncthing.patchFolder(request.params.id, update)
+      ).catch(folderPathFailure);
+      diagnostics.write('info', '已更新同步文件夹配置');
       return folderView({ ...current, ...(await syncthing.folder(request.params.id)) });
     },
   );
@@ -1396,6 +1901,7 @@ export async function createServer(options: CreateServerOptions) {
     { schema: { params: FolderParamsSchema } },
     async (request) => {
       await syncthing.removeFolder(request.params.id);
+      diagnostics.write('info', '已移除同步文件夹配置，本机文件保持不变');
       return { message: '文件夹已删除，本地文件未被删除' };
     },
   );
@@ -1409,6 +1915,7 @@ export async function createServer(options: CreateServerOptions) {
       { schema: { params: FolderParamsSchema } },
       async (request) => {
         await syncthing.patchFolder(request.params.id, { paused });
+        diagnostics.write('info', paused ? '已暂停同步文件夹' : '已继续同步文件夹');
         return folderView(await syncthing.folder(request.params.id));
       },
     );
@@ -1419,7 +1926,40 @@ export async function createServer(options: CreateServerOptions) {
     { schema: { params: FolderParamsSchema } },
     async (request) => {
       await syncthing.scanFolder(request.params.id);
+      diagnostics.write('info', '已提交文件夹扫描');
       return { message: '已开始扫描文件夹' };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/folders/:id/repair-marker',
+    { schema: { params: FolderParamsSchema } },
+    async (request) => {
+      const session = authenticated(request);
+      if (config.headless || !session.desktop) {
+        throw new HttpError(
+          403,
+          'desktop_session_required',
+          '只能在节点本机确认目录并恢复同步安全标记',
+        );
+      }
+      const folder = optionalSyncthing.folder
+        ? await optionalSyncthing.folder(request.params.id)
+        : ({
+            id: request.params.id,
+            path: '',
+            versioning: { type: 'staggered' },
+          } as SyncthingFolderConfig);
+      const status = await syncthing.folderStatus(request.params.id);
+      if (!/folder marker missing/i.test(status.error ?? '')) {
+        throw new HttpError(409, 'folder_marker_not_missing', '此文件夹当前不需要恢复安全标记');
+      }
+      if (folder.markerName && folder.markerName !== '.stfolder') {
+        throw new HttpError(409, 'custom_folder_marker', '无法自动恢复自定义同步安全标记');
+      }
+      await restoreFolderMarker(folder.path, folder.id);
+      await syncthing.scanFolder(folder.id);
+      return folderView(await syncthing.folder(folder.id));
     },
   );
 
@@ -1490,11 +2030,12 @@ export async function createServer(options: CreateServerOptions) {
           folder.folderId === request.params.folderId,
       );
       if (!pending) throw new HttpError(404, 'pending_folder_not_found', '待处理文件夹不存在');
-      if (configuredFolders.some((folder) => folder.id === pending.folderId)) {
+      const existing = configuredFolders.find((folder) => folder.id === pending.folderId);
+      if (existing && request.body.useExisting !== true) {
         throw new HttpError(
           409,
           'folder_already_configured',
-          '同 ID 文件夹已存在，不能用远端邀请覆盖本机配置',
+          '同 ID 文件夹已存在；可明确选择“共享现有文件夹”，原有位置、方向和版本设置会保持不变',
         );
       }
       if (
@@ -1505,18 +2046,43 @@ export async function createServer(options: CreateServerOptions) {
       ) {
         throw new HttpError(409, 'folder_ignored', '请先在设置中取消忽略该文件夹');
       }
+      if (existing) {
+        await folderDevices([deviceId]);
+        if (optionalSyncthing.shareFolderWithDevice) {
+          await optionalSyncthing.shareFolderWithDevice(existing.id, deviceId);
+        } else {
+          const selfId = (await syncthing.status()).myID;
+          const devices = await folderDevices(
+            [
+              ...(existing.devices ?? [])
+                .map((device) => device.deviceID)
+                .filter((id) => id !== selfId),
+              deviceId,
+            ],
+            existing.devices,
+          );
+          await syncthing.patchFolder(existing.id, { devices });
+        }
+        await syncthing.dismissPendingFolder(deviceId, pending.folderId).catch(() => undefined);
+        return folderView(await syncthing.folder(existing.id));
+      }
+      if (!request.body.directoryId) {
+        throw new HttpError(400, 'directory_required', '接收新文件夹前必须选择本机目录');
+      }
       const selection = await directories.resolveSelection(request.body.directoryId);
       const days = currentPreferences(config, store).versioningDays;
       const devices = await folderDevices([deviceId]);
-      await syncthing.putFolder({
-        id: pending.folderId,
-        label: boundedRemoteText(pending.label, pending.folderId, 128),
-        path: selection.path,
-        type: request.body.type ?? 'sendreceive',
-        paused: false,
-        devices,
-        versioning: versioning(days),
-      });
+      await syncthing
+        .putFolderChecked({
+          id: pending.folderId,
+          label: boundedRemoteText(pending.label, pending.folderId, 128),
+          path: selection.path,
+          type: request.body.type ?? 'sendreceive',
+          paused: false,
+          devices,
+          versioning: versioning(days),
+        })
+        .catch(folderPathFailure);
       await syncthing.dismissPendingFolder(deviceId, pending.folderId).catch(() => undefined);
       return folderView(await syncthing.folder(pending.folderId));
     },
@@ -1546,28 +2112,71 @@ export async function createServer(options: CreateServerOptions) {
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: string }; Querystring: VersionListQuery }>(
     '/api/v1/folders/:id/versions',
-    { schema: { params: FolderParamsSchema } },
+    { schema: { params: FolderParamsSchema, querystring: VersionListQuerySchema } },
     async (request) => {
+      const folder = optionalSyncthing.folder
+        ? await optionalSyncthing.folder(request.params.id)
+        : ({
+            id: request.params.id,
+            path: '',
+            versioning: { type: 'staggered' },
+          } as SyncthingFolderConfig);
+      if (folder.paused === true) {
+        throw new HttpError(
+          409,
+          'folder_paused',
+          '文件夹已暂停；请先明确继续同步，再查看或恢复历史版本',
+        );
+      }
+      if (!folder.versioning?.type) {
+        throw new HttpError(409, 'versioning_disabled', '此文件夹未启用历史版本');
+      }
       const versions = await syncthing.folderVersions(request.params.id);
+      const search = (request.query.search ?? '').trim().toLocaleLowerCase('zh-CN');
+      const filterPath = request.query.path
+        ? requestRelativePath(request.query.path, false).split(sep).join('/')
+        : undefined;
+      const scope = createHash('sha256')
+        .update(`${request.params.id}\0${search}\0${filterPath ?? ''}`)
+        .digest('base64url')
+        .slice(0, 16);
+      const offset = decodeOffsetCursor(request.query.cursor, scope);
+      const limit = request.query.limit ?? 50;
+      const allItems = Object.entries(versions)
+        .flatMap(([path, entries]) => {
+          try {
+            const safePath = safeRelativePath(path);
+            if (!safePath) return [];
+            const apiPath = safePath.split(sep).join('/');
+            return entries.map((entry) => ({
+              path: apiPath,
+              versionTime: normalizeDate(entry.versionTime),
+              size: Math.max(0, Math.floor(entry.size)),
+            }));
+          } catch {
+            return [];
+          }
+        })
+        .filter(
+          (item) =>
+            (!filterPath || item.path === filterPath) &&
+            (!search || item.path.toLocaleLowerCase('zh-CN').includes(search)),
+        )
+        .sort(
+          (left, right) =>
+            left.path.localeCompare(right.path, 'zh-CN') ||
+            right.versionTime.localeCompare(left.versionTime),
+        );
+      const items = allItems.slice(offset, offset + limit);
+      const nextCursor =
+        offset + items.length < allItems.length
+          ? encodeOffsetCursor(scope, offset + items.length)
+          : undefined;
       return {
-        items: Object.entries(versions)
-          .flatMap(([path, entries]) => {
-            try {
-              const safePath = safeRelativePath(path);
-              if (!safePath) return [];
-              const apiPath = safePath.split(sep).join('/');
-              return entries.map((entry) => ({
-                path: apiPath,
-                versionTime: normalizeDate(entry.versionTime),
-                size: Math.max(0, Math.floor(entry.size)),
-              }));
-            } catch {
-              return [];
-            }
-          })
-          .sort((left, right) => right.versionTime.localeCompare(left.versionTime)),
+        items,
+        ...(nextCursor ? { nextCursor } : {}),
       };
     },
   );
@@ -1576,6 +2185,19 @@ export async function createServer(options: CreateServerOptions) {
     '/api/v1/folders/:id/restore',
     { schema: { params: FolderParamsSchema, body: RestoreVersionsRequestSchema } },
     async (request) => {
+      const folder = optionalSyncthing.folder
+        ? await optionalSyncthing.folder(request.params.id)
+        : ({
+            id: request.params.id,
+            path: '',
+            versioning: { type: 'staggered' },
+          } as SyncthingFolderConfig);
+      if (folder.paused === true) {
+        throw new HttpError(409, 'folder_paused', '文件夹已暂停；请先明确继续同步，再恢复历史版本');
+      }
+      if (!folder.versioning?.type) {
+        throw new HttpError(409, 'versioning_disabled', '此文件夹未启用历史版本');
+      }
       const path = requestRelativePath(request.body.path, false).split(sep).join('/');
       const result = await syncthing.restoreVersion(
         request.params.id,
@@ -1587,6 +2209,117 @@ export async function createServer(options: CreateServerOptions) {
       return { message: '文件版本已恢复' };
     },
   );
+
+  app.get<{ Params: { id: string } }>(
+    '/api/v1/folders/:id/ignores',
+    { schema: { params: FolderParamsSchema, response: { 200: FolderIgnoreListSchema } } },
+    async (request) => {
+      const value = await syncthing.folderIgnores(request.params.id);
+      const lines = value.ignore ?? [];
+      return {
+        lines,
+        hasIncludes: lines.some((line) => /^\s*#include\s+/i.test(line)),
+      };
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: UpdateFolderIgnoresRequest }>(
+    '/api/v1/folders/:id/ignores',
+    { schema: { params: FolderParamsSchema, body: UpdateFolderIgnoresRequestSchema } },
+    async (request) => {
+      const existing = (await syncthing.folderIgnores(request.params.id)).ignore ?? [];
+      const existingIncludes = new Set(existing.filter((line) => /^\s*#include\s+/i.test(line)));
+      const addedInclude = request.body.lines.find(
+        (line) => /^\s*#include\s+/i.test(line) && !existingIncludes.has(line),
+      );
+      if (addedInclude) {
+        throw new HttpError(
+          400,
+          'ignore_include_not_allowed',
+          '管理界面不能新增或改写 #include；可保留或移除已有 include 行',
+        );
+      }
+      await syncthing.setFolderIgnores(request.params.id, request.body.lines).catch((error) => {
+        throw new HttpError(
+          400,
+          'ignore_syntax_error',
+          error instanceof Error ? error.message : '忽略规则语法无效',
+        );
+      });
+      return {
+        lines: request.body.lines,
+        hasIncludes: request.body.lines.some((line) => /^\s*#include\s+/i.test(line)),
+      };
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: PagedFolderQuery }>(
+    '/api/v1/folders/:id/errors',
+    { schema: { params: FolderParamsSchema, querystring: PagedFolderQuerySchema } },
+    async (request) => {
+      const limit = request.query.limit ?? 50;
+      const scope = `errors:${request.params.id}`;
+      const offset = decodeOffsetCursor(request.query.cursor, scope);
+      const result = await syncthing.folderErrors(
+        request.params.id,
+        Math.floor(offset / limit) + 1,
+        limit,
+      );
+      const items = (result.errors ?? []).flatMap((item) => {
+        try {
+          const path = requestRelativePath(item.path ?? '', false)
+            .split(sep)
+            .join('/');
+          return [{ path, message: (item.error || '同步失败').slice(0, 2048) }];
+        } catch {
+          return [];
+        }
+      });
+      return {
+        items,
+        nextCursor:
+          items.length === limit ? encodeOffsetCursor(scope, offset + items.length) : null,
+      };
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: PagedFolderQuery }>(
+    '/api/v1/folders/:id/conflicts',
+    { schema: { params: FolderParamsSchema, querystring: PagedFolderQuerySchema } },
+    async (request) => {
+      const folder = await syncthing.folder(request.params.id);
+      return files.conflicts(
+        folder.id,
+        folder.path,
+        request.query.limit ?? 50,
+        request.query.cursor,
+      );
+    },
+  );
+
+  for (const action of ['override', 'revert'] as const) {
+    app.post<{ Params: { id: string } }>(
+      `/api/v1/folders/:id/${action}`,
+      { schema: { params: FolderParamsSchema } },
+      async (request) => {
+        const folder = await syncthing.folder(request.params.id);
+        if (action === 'override' && folder.type !== 'sendonly') {
+          throw new HttpError(409, 'folder_mode_mismatch', '只有仅发送文件夹可以覆盖远端变化');
+        }
+        if (action === 'revert' && folder.type !== 'receiveonly') {
+          throw new HttpError(409, 'folder_mode_mismatch', '只有仅接收文件夹可以还原本机变化');
+        }
+        if (action === 'override') await syncthing.overrideFolder(folder.id);
+        else await syncthing.revertFolder(folder.id);
+        return {
+          message:
+            action === 'override'
+              ? '已提交覆盖远端变化操作，请等待同步状态确认完成'
+              : '已提交还原本机变化操作，请等待同步状态确认完成',
+        };
+      },
+    );
+  }
 
   app.get<{ Params: { id: string }; Querystring: FolderFilesQuery }>(
     '/api/v1/folders/:id/files',
@@ -1665,6 +2398,28 @@ export async function createServer(options: CreateServerOptions) {
       return { message: '已在文件管理器中显示' };
     },
   );
+
+  app.post('/api/v1/directories/select', async (request, reply) => {
+    const session = authenticated(request);
+    if (config.headless || !session.desktop || !nativeDirectoryPicker) {
+      throw new HttpError(
+        403,
+        'desktop_session_required',
+        '仅受支持平台的桌面会话可以打开系统目录选择器',
+      );
+    }
+    if (directoryPickerActive) {
+      throw new HttpError(409, 'directory_picker_active', '系统目录选择器已经打开');
+    }
+    directoryPickerActive = true;
+    try {
+      const path = await nativeDirectoryPicker();
+      if (!path) return reply.status(204).send();
+      return directories.registerSelection(path);
+    } finally {
+      directoryPickerActive = false;
+    }
+  });
 
   app.get('/api/v1/directory-roots', async () => directories.roots());
   app.get<{ Querystring: DirectoryQuery }>(

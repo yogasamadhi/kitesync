@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, Card, formatBytes } from '@kitesync/ui';
 import type { NodeInfo } from '@kitesync/contracts';
@@ -6,8 +6,36 @@ import { api } from './api.js';
 import { DevicesPanel } from './devices-panel.js';
 import { FoldersPanel } from './folders-panel.js';
 import { SettingsPanel } from './settings-panel.js';
+import { confirmDiscardChanges } from './unsaved-changes.js';
 
 type Section = 'overview' | 'devices' | 'folders' | 'settings';
+type FolderTab = 'files' | 'versions' | 'settings';
+
+interface AppLocation {
+  section: Section;
+  folderId?: string;
+  tab?: FolderTab;
+  path?: string;
+}
+
+function readLocation(): AppLocation {
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  const section = (['overview', 'devices', 'folders', 'settings'] as const).includes(
+    parts[0] as Section,
+  )
+    ? (parts[0] as Section)
+    : 'overview';
+  if (section !== 'folders' || !parts[1]) return { section };
+  const tab = (['files', 'versions', 'settings'] as const).includes(parts[2] as FolderTab)
+    ? (parts[2] as FolderTab)
+    : 'files';
+  return {
+    section,
+    folderId: decodeURIComponent(parts[1]),
+    tab,
+    path: new URLSearchParams(window.location.search).get('path') ?? '',
+  };
+}
 
 const sectionCopy: Record<Section, { title: string; detail: string }> = {
   overview: { title: '节点总览', detail: '当前电脑的同步状态一目了然' },
@@ -23,9 +51,35 @@ export function Dashboard({
   initialNode: NodeInfo;
   onLogout: () => void;
 }) {
-  const [section, setSection] = useState<Section>('overview');
+  const [location, setLocation] = useState(readLocation);
+  const currentUrl = useRef(`${window.location.pathname}${window.location.search}`);
   const queryClient = useQueryClient();
   const node = useQuery({ queryKey: ['node'], queryFn: api.node, initialData: initialNode });
+
+  useEffect(() => {
+    const update = () => {
+      if (!confirmDiscardChanges()) {
+        window.history.pushState(null, '', currentUrl.current);
+        return;
+      }
+      currentUrl.current = `${window.location.pathname}${window.location.search}`;
+      setLocation(readLocation());
+    };
+    window.addEventListener('popstate', update);
+    return () => window.removeEventListener('popstate', update);
+  }, []);
+
+  function navigate(next: AppLocation) {
+    if (!confirmDiscardChanges()) return;
+    const pathname =
+      next.section === 'folders' && next.folderId
+        ? `/folders/${encodeURIComponent(next.folderId)}/${next.tab ?? 'files'}`
+        : `/${next.section}`;
+    const query = next.path ? `?path=${encodeURIComponent(next.path)}` : '';
+    window.history.pushState(null, '', pathname + query);
+    currentUrl.current = pathname + query;
+    setLocation(readLocation());
+  }
 
   const refresh = () => void queryClient.invalidateQueries();
 
@@ -36,20 +90,52 @@ export function Dashboard({
           <span className="brand-mark">K</span>
           <div>
             <b>KiteSync</b>
-            <small>本机节点</small>
+            <small>{node.data.name}</small>
           </div>
         </div>
         <nav aria-label="主导航">
-          <NavButton id="overview" label="总览" icon="⌂" current={section} onSelect={setSection} />
-          <NavButton id="devices" label="设备" icon="◇" current={section} onSelect={setSection} />
-          <NavButton id="folders" label="文件夹" icon="▱" current={section} onSelect={setSection} />
-          <NavButton id="settings" label="设置" icon="⚙" current={section} onSelect={setSection} />
+          <NavButton
+            id="overview"
+            label="总览"
+            icon="⌂"
+            current={location.section}
+            onSelect={(section) => navigate({ section })}
+          />
+          <NavButton
+            id="devices"
+            label="设备"
+            icon="◇"
+            current={location.section}
+            onSelect={(section) => navigate({ section })}
+          />
+          <NavButton
+            id="folders"
+            label="文件夹"
+            icon="▱"
+            current={location.section}
+            onSelect={(section) => navigate({ section })}
+          />
+          <NavButton
+            id="settings"
+            label="设置"
+            icon="⚙"
+            current={location.section}
+            onSelect={(section) => navigate({ section })}
+          />
         </nav>
         <div className="node-summary">
-          <span className="status-dot" />
+          <span
+            className={`status-dot ${node.isError || node.data.engineStatus === 'unavailable' ? 'status-dot--error' : ''}`}
+          />
           <div>
             <strong>{node.data.name}</strong>
-            <small>节点正在运行</small>
+            <small>
+              {node.isError
+                ? '节点服务连接异常'
+                : node.data.engineStatus === 'unavailable'
+                  ? '同步引擎正在重连'
+                  : '节点服务已连接'}
+            </small>
           </div>
         </div>
         <button className="logout-button" onClick={() => void api.logout().finally(onLogout)}>
@@ -60,20 +146,55 @@ export function Dashboard({
       <main className="content">
         <header className="page-header">
           <div>
-            <p className="eyebrow">{sectionCopy[section].detail}</p>
-            <h1>{sectionCopy[section].title}</h1>
+            <p className="eyebrow">{sectionCopy[location.section].detail}</p>
+            <h1>{sectionCopy[location.section].title}</h1>
           </div>
-          <Button className="secondary-button" onClick={refresh}>
-            刷新状态
-          </Button>
+          <div className="header-actions">
+            <button className="identity-chip" onClick={() => navigate({ section: 'devices' })}>
+              {node.data.name}
+            </button>
+            <Button className="secondary-button" onClick={refresh}>
+              刷新状态
+            </Button>
+            <button className="header-lock" onClick={() => void api.logout().finally(onLogout)}>
+              锁定
+            </button>
+          </div>
         </header>
 
-        {section === 'overview' && (
-          <Overview node={node.data} onNavigate={(destination) => setSection(destination)} />
+        {(node.isError || node.data.engineStatus === 'unavailable') && (
+          <Card className="stale-banner" role="alert">
+            <strong>
+              {node.isError ? '节点服务连接已中断，页面显示的是旧数据' : node.data.engineError}
+            </strong>
+            <span>
+              最后成功状态：
+              {new Date(node.data.statusUpdatedAt ?? node.dataUpdatedAt).toLocaleString('zh-CN')}
+            </span>
+            <Button className="secondary-button" onClick={() => void node.refetch()}>
+              重新连接
+            </Button>
+          </Card>
         )}
-        {section === 'devices' && <DevicesPanel node={node.data} />}
-        {section === 'folders' && <FoldersPanel canRevealFiles={node.data.canRevealFiles} />}
-        {section === 'settings' && <SettingsPanel />}
+
+        {location.section === 'overview' && (
+          <Overview node={node.data} onNavigate={(section) => navigate({ section })} />
+        )}
+        {location.section === 'devices' && <DevicesPanel node={node.data} />}
+        {location.section === 'folders' && (
+          <FoldersPanel
+            canRevealFiles={node.data.canRevealFiles}
+            canPickDirectories={node.data.canPickDirectories}
+            nodeName={node.data.name}
+            {...(location.folderId ? { selectedFolderId: location.folderId } : {})}
+            selectedTab={location.tab ?? 'files'}
+            selectedPath={location.path ?? ''}
+            onNavigate={(folderId, tab = 'files', path = '') =>
+              navigate({ section: 'folders', ...(folderId ? { folderId, tab, path } : {}) })
+            }
+          />
+        )}
+        {location.section === 'settings' && <SettingsPanel onPasswordChanged={onLogout} />}
       </main>
     </div>
   );
@@ -121,11 +242,51 @@ function Overview({
   const paired = devices.data?.items ?? [];
   const shared = folders.data?.items ?? [];
   const needBytes = shared.reduce((total, folder) => total + folder.needBytes, 0);
+  const needItems = shared.reduce((total, folder) => total + (folder.needItems ?? 0), 0);
+  const needDeletes = shared.reduce((total, folder) => total + (folder.needDeletes ?? 0), 0);
+  const divergences = shared.reduce(
+    (total, folder) => total + (folder.receiveOnlyChangedItems ?? 0),
+    0,
+  );
+  const errors = shared.filter((folder) => folder.error || folder.pathConflicts?.length);
+  const offline = paired.filter((device) => !device.connected && !device.paused);
+  const lastCompletedAt = shared
+    .map((folder) => folder.lastCompletedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
   const pendingCount =
     (pendingDevices.data?.items.length ?? 0) + (pendingFolders.data?.items.length ?? 0);
+  const detailStale =
+    devices.isError || folders.isError || pendingDevices.isError || pendingFolders.isError;
+  const lastDetailUpdate = Math.max(
+    devices.dataUpdatedAt,
+    folders.dataUpdatedAt,
+    pendingDevices.dataUpdatedAt,
+    pendingFolders.dataUpdatedAt,
+  );
 
   return (
     <>
+      {detailStale && (
+        <Card className="stale-banner" role="alert">
+          <strong>同步详情暂时无法更新，以下为最后一次成功数据</strong>
+          {lastDetailUpdate > 0 && (
+            <span>最后成功：{new Date(lastDetailUpdate).toLocaleString('zh-CN')}</span>
+          )}
+          <Button
+            className="secondary-button"
+            onClick={() => {
+              void devices.refetch();
+              void folders.refetch();
+              void pendingDevices.refetch();
+              void pendingFolders.refetch();
+            }}
+          >
+            重新连接
+          </Button>
+        </Card>
+      )}
       <div className="metric-grid">
         <Card className="metric-card">
           <span>已连接设备</span>
@@ -135,12 +296,18 @@ function Overview({
         <Card className="metric-card">
           <span>同步文件夹</span>
           <strong>{shared.length}</strong>
-          <small>{shared.filter((folder) => !folder.paused).length} 个正在工作</small>
+          <small>
+            {lastCompletedAt
+              ? `最近完成 ${new Date(lastCompletedAt).toLocaleString('zh-CN')}`
+              : `${shared.filter((folder) => !folder.paused).length} 个正在工作`}
+          </small>
         </Card>
         <Card className="metric-card">
           <span>等待同步</span>
           <strong>{formatBytes(needBytes)}</strong>
-          <small>{pendingCount ? `${pendingCount} 项请求待处理` : '没有待处理请求'}</small>
+          <small>
+            {needItems} 个项目 · {needDeletes} 个待删除
+          </small>
         </Card>
       </div>
 
@@ -161,14 +328,35 @@ function Overview({
         </Card>
       )}
 
-      <div className="overview-grid">
+      {(errors.length > 0 || offline.length > 0 || divergences > 0) && (
+        <Card className="attention-card attention-list">
+          <div className="attention-icon">!</div>
+          <div>
+            <strong>有需要处理的同步状态</strong>
+            {errors.length > 0 && <p>{errors.length} 个文件夹存在错误或目录重叠</p>}
+            {offline.length > 0 && <p>{offline.length} 台同步目标当前离线</p>}
+            {divergences > 0 && <p>{divergences} 项仅接收目录本机变化等待处理</p>}
+          </div>
+          <Button onClick={() => onNavigate(errors.length || divergences ? 'folders' : 'devices')}>
+            查看详情
+          </Button>
+        </Card>
+      )}
+
+      <div className="overview-grid overview-grid--single">
         <Card className="node-card">
           <div className="card-heading">
             <div>
               <p className="eyebrow">当前节点</p>
               <h2>{node.name}</h2>
             </div>
-            <Badge tone="good">运行中</Badge>
+            <Badge tone={errors.length || node.engineStatus === 'unavailable' ? 'warn' : 'good'}>
+              {node.engineStatus === 'unavailable'
+                ? '同步引擎异常'
+                : errors.length
+                  ? '需要处理'
+                  : '服务已连接'}
+            </Badge>
           </div>
           <dl className="detail-list">
             <div>
@@ -202,19 +390,6 @@ function Overview({
               <dd>{node.localDiscoveryEnabled ? '已开启' : '不可用'}</dd>
             </div>
           </dl>
-        </Card>
-
-        <Card className="principle-card">
-          <p className="eyebrow">本地优先</p>
-          <h2>没有必需的中心服务器</h2>
-          <p>
-            设备在局域网内直接同步。Linux 电脑可以像任何其他节点一样常驻在线，但并不拥有其他设备。
-          </p>
-          <div className="flow-line" aria-label="设备直接连接示意">
-            <span>这台电脑</span>
-            <i />
-            <span>已配对设备</span>
-          </div>
         </Card>
       </div>
 

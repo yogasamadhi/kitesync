@@ -25,6 +25,7 @@ const node = {
   localDiscoveryEnabled: true,
   connectedPeers: 1,
   canRevealFiles: true,
+  canPickDirectories: true,
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -145,6 +146,8 @@ test('双击启动生成的 hash token 会被交换并立即从地址栏清除',
 test('节点管理界面覆盖配对、文件浏览、版本和来源设置', async ({ page }) => {
   let discoveredPairBody: Record<string, unknown> | undefined;
   let unignoredDeviceId = '';
+  let settingsPatch: Record<string, unknown> | undefined;
+  let settingsIfMatch = '';
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -213,6 +216,8 @@ test('节点管理界面覆盖配对、文件浏览、版本和来源设置', as
             globalBytes: 2048,
             needBytes: 0,
             error: null,
+            errorCode: null,
+            errorCount: 0,
             versioningDays: 30,
           },
         ],
@@ -255,14 +260,34 @@ test('节点管理界面覆盖配对、文件浏览、版本和来源设置', as
     if (path === '/api/v1/folders/photos/versions') {
       return json(route, { items: [{ path: '海边.jpg', versionTime: now, size: 1024 }] });
     }
-    if (path === '/api/v1/settings') {
-      return json(route, {
-        nodeName: '书房 Mac',
-        lanAccessEnabled: false,
-        allowedOrigins: ['https://sync.example.test'],
-        trustedProxies: [],
-        versioningDays: 30,
-        uiPort: 3210,
+    if (path === '/api/v1/settings' && request.method() === 'GET') {
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"settings-v1"' },
+        body: JSON.stringify({
+          nodeName: '书房 Mac',
+          lanAccessEnabled: false,
+          allowedOrigins: ['https://sync.example.test'],
+          trustedProxies: [],
+          versioningDays: 30,
+          uiPort: 3210,
+        }),
+      });
+    }
+    if (path === '/api/v1/settings' && request.method() === 'PATCH') {
+      settingsPatch = request.postDataJSON() as Record<string, unknown>;
+      settingsIfMatch = request.headers()['if-match'] ?? '';
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"settings-v2"' },
+        body: JSON.stringify({
+          nodeName: settingsPatch.nodeName ?? '书房 Mac',
+          lanAccessEnabled: false,
+          allowedOrigins: ['https://sync.example.test'],
+          trustedProxies: [],
+          versioningDays: 30,
+          uiPort: 3210,
+        }),
       });
     }
     return json(route, { message: 'ok' });
@@ -290,6 +315,8 @@ test('节点管理界面覆盖配对、文件浏览、版本和来源设置', as
   const folderOffer = page.locator('.folder-offer-card').filter({ hasText: '工作资料' });
   await expect(folderOffer.getByText(peerId, { exact: true })).toBeVisible();
   await expect(folderOffer.getByText(/来源短指纹：PEERAA A/)).toBeVisible();
+  await page.locator('.folder-list-row').filter({ hasText: '家庭照片' }).click();
+  await expect(page).toHaveURL(/\/folders\/photos\/files$/);
   await expect(page.getByRole('heading', { name: '家庭照片' })).toBeVisible();
   await expect(page.getByText('海边.jpg', { exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: '下载' })).toHaveAttribute(
@@ -297,17 +324,108 @@ test('节点管理界面覆盖配对、文件浏览、版本和来源设置', as
     /\/api\/v1\/folders\/photos\/download\?path=/,
   );
   await expect(page.getByText('链接不可访问')).toBeVisible();
-  await page.getByRole('button', { name: '历史版本' }).click();
+  await page.getByRole('tab', { name: '历史版本', exact: true }).click();
+  await expect(page).toHaveURL(/\/folders\/photos\/versions$/);
   await expect(page.getByRole('button', { name: '恢复此版本' })).toBeVisible();
 
   await page.getByRole('button', { name: '设置', exact: true }).click();
+  await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: '局域网访问' })).toBeVisible();
   await expect(page.getByLabel('允许的 HTTPS 来源')).toHaveValue('https://sync.example.test');
+  await page.getByLabel('节点名称').fill('工作室 Mac');
+  await page.getByRole('button', { name: '保存设置' }).click();
+  await expect(page.getByText('设置已保存', { exact: true })).toBeVisible();
+  expect(settingsPatch).toEqual({ nodeName: '工作室 Mac' });
+  expect(settingsIfMatch).toBe('"settings-v1"');
   await expect(page.getByRole('heading', { name: '已忽略的设备' })).toBeVisible();
   await expect(page.getByText(ignoredId, { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '允许重新配对' }).click();
   await expect.poll(() => unignoredDeviceId).toBe(ignoredId);
   await expect(page.getByRole('heading', { name: '已忽略的文件夹邀请' })).toBeVisible();
+
+  await page.getByLabel('节点名称').fill('尚未保存的名称');
+  page.once('dialog', (dialog) => dialog.dismiss());
+  await page.getByRole('button', { name: '设备', exact: true }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: '设备', exact: true }).click();
+  await expect(page).toHaveURL(/\/devices$/);
+});
+
+test('选择同步目录后以文件夹名作为可编辑的显示名称', async ({ page }) => {
+  let createFolderBody: Record<string, unknown> | undefined;
+  await installBaseApi(page);
+  await page.route('**/api/v1/directories/select', async (route) => {
+    await json(route, { id: 'dir-music', label: 'Music' });
+  });
+  await page.route('**/api/v1/folders', async (route) => {
+    if (route.request().method() === 'POST') {
+      createFolderBody = route.request().postDataJSON() as Record<string, unknown>;
+      return json(route, {});
+    }
+    return json(route, { items: [] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: '文件夹', exact: true }).click();
+  const displayName = page.getByLabel('显示名称');
+  await expect(displayName).toHaveValue('');
+  await page.getByRole('button', { name: '浏览' }).click();
+
+  await expect(displayName).toHaveValue('Music');
+  await displayName.fill('我的音乐');
+  await page.getByRole('button', { name: '创建文件夹' }).click();
+  await expect
+    .poll(() => createFolderBody)
+    .toEqual({
+      label: '我的音乐',
+      directoryId: 'dir-music',
+      type: 'sendreceive',
+      deviceIds: [],
+    });
+});
+
+test('错误文件夹说明原因并提供对应的处理操作', async ({ page }) => {
+  let repaired = false;
+  await installBaseApi(page);
+  const problemFolder = {
+    id: 'problem-folder',
+    label: '家庭照片',
+    pathLabel: '照片',
+    type: 'sendreceive',
+    paused: false,
+    deviceIds: [],
+    state: 'error',
+    localBytes: 0,
+    globalBytes: 0,
+    needBytes: 0,
+    error:
+      '同步安全标记已丢失。请先确认这里仍是原来的同步目录；如果是外接磁盘或网络目录，请先重新连接。确认文件完整后再恢复同步。',
+    errorCode: 'marker_missing',
+    errorCount: 0,
+    versioningDays: 30,
+  };
+  await page.route('**/api/v1/folders', async (route) => {
+    await json(route, { items: [problemFolder] });
+  });
+  await page.route('**/api/v1/folders/problem-folder/files?*', async (route) => {
+    await json(route, { path: '', parentPath: null, items: [], nextCursor: null });
+  });
+  await page.route('**/api/v1/folders/problem-folder/repair-marker', async (route) => {
+    repaired = true;
+    await json(route, { ...problemFolder, state: 'idle', error: null, errorCode: null });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: '文件夹', exact: true }).click();
+  await expect(page.getByText('目录需确认')).toBeVisible();
+  await page.locator('.folder-list-row').filter({ hasText: '家庭照片' }).click();
+  await expect(page.getByText('请先确认同步目录')).toBeVisible();
+  await expect(page.getByText(/同步安全标记已丢失/)).toBeVisible();
+
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('button', { name: '确认目录无误并恢复' }).click();
+  await expect.poll(() => repaired).toBe(true);
 });
 
 test('Node Service 重启使内存会话失效后自动返回登录页', async ({ page }) => {
@@ -378,6 +496,8 @@ test('只读文件列表可连续翻页并回退到已浏览页面', async ({ pa
             globalBytes: 3,
             needBytes: 0,
             error: null,
+            errorCode: null,
+            errorCount: 0,
             versioningDays: 30,
           },
         ],
@@ -406,6 +526,7 @@ test('只读文件列表可连续翻页并回退到已浏览页面', async ({ pa
 
   await page.goto('/');
   await page.getByRole('button', { name: '文件夹', exact: true }).click();
+  await page.locator('.folder-list-row').filter({ hasText: '文档' }).click();
   await expect(page.getByText('第1页.txt', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '下一页' }).click();
   await expect(page.getByText('第2页.txt', { exact: true })).toBeVisible();
@@ -415,6 +536,59 @@ test('只读文件列表可连续翻页并回退到已浏览页面', async ({ pa
   await expect(page.getByText('第2页.txt', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '上一页' }).click();
   await expect(page.getByText('第1页.txt', { exact: true })).toBeVisible();
+});
+
+test('文件夹详情按路由恢复且只加载当前目录，390px 保留主要操作', async ({ page }) => {
+  let photosRequests = 0;
+  let documentsRequests = 0;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installBaseApi(page);
+  const folder = (id: string, label: string) => ({
+    id,
+    label,
+    pathLabel: label,
+    type: 'sendreceive',
+    paused: false,
+    deviceIds: [],
+    state: 'idle',
+    localBytes: 0,
+    globalBytes: 0,
+    needBytes: 0,
+    error: null,
+    errorCode: null,
+    errorCount: 0,
+    versioningDays: 30,
+  });
+  await page.route('**/api/v1/folders', async (route) => {
+    await json(route, { items: [folder('photos', '照片'), folder('documents', '文档')] });
+  });
+  await page.route('**/api/v1/folders/photos/files?*', async (route) => {
+    photosRequests += 1;
+    await json(route, { path: '', parentPath: null, items: [], nextCursor: null });
+  });
+  await page.route('**/api/v1/folders/documents/files?*', async (route) => {
+    documentsRequests += 1;
+    await json(route, { path: '', parentPath: null, items: [], nextCursor: null });
+  });
+
+  await page.goto('/folders/photos/files');
+  await expect(page.getByRole('heading', { name: '照片' })).toBeVisible();
+  await expect.poll(() => photosRequests).toBeGreaterThan(0);
+  expect(documentsRequests).toBe(0);
+
+  const tabs = [
+    page.getByRole('tab', { name: '文件', exact: true }),
+    page.getByRole('tab', { name: '历史版本', exact: true }),
+    page.getByRole('tab', { name: '文件夹设置', exact: true }),
+  ];
+  const boxes = await Promise.all(tabs.map((tab) => tab.boundingBox()));
+  expect(new Set(boxes.map((box) => Math.round(box?.y ?? -1))).size).toBe(1);
+  await expect(page.getByRole('button', { name: '刷新状态' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '锁定', exact: true })).toBeVisible();
+
+  await page.locator('.folder-list-row').filter({ hasText: '文档' }).click();
+  await expect(page).toHaveURL(/\/folders\/documents\/files$/);
+  await expect.poll(() => documentsRequests).toBeGreaterThan(0);
 });
 
 test('浏览器中的会话到期时无需再发请求也会自动返回登录页', async ({ page }) => {

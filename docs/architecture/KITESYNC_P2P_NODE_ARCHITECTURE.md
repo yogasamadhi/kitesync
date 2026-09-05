@@ -59,6 +59,10 @@ folder ID、标签和来源设备，必须自己选择目录和模式。任何�
 默认模式为 `sendreceive`，高级模式为 `sendonly` 和 `receiveonly`。新建与接受的文件夹默认使用
 staggered versioning，最大 30 天；关闭或修改保留期直接更新该文件夹的 Syncthing 配置。
 
+Syncthing 报告 folder marker 丢失时，UI 必须提示用户先确认挂载点和目录内容，不能只显示通用错误
+或自动继续同步。只有本机桌面会话在二次确认后可以恢复 `.stfolder` 安全标记并触发重新扫描；
+该恢复操作不得修改用户文件。
+
 ## 管理页认证
 
 首次本地访问设置每节点唯一管理员密码，使用 `Bun.password` Argon2id 保存 PHC hash。只有设置
@@ -68,6 +72,10 @@ staggered versioning，最大 30 天；关闭或修改保留期直接更新该�
 桌面快捷方式持有的本机 open secret 保存在 Windows DPAPI 或 macOS Keychain；Linux headless
 节点使用 owner-only 文件。`/internal/open-token` 同时要求 loopback 来源和 open secret，并签发
 一次性、短时有效 token。它在 LAN 模式下也不能远程调用。
+
+只有桌面会话可以调用 macOS/Windows 系统目录选择器或在文件管理器中显示文件。系统选择结果
+会转换成短期不透明目录标识，绝对路径不会返回浏览器；远程与 headless 会话只能使用受目录根
+限制的 Web 选择器，且不能在节点宿主机上弹出窗口。
 
 Host/Origin 仅允许 loopback、本机私有或链路本地地址、本机 hostname/`.local` 和显式配置的
 HTTPS origin。默认仅信任 loopback proxy；只有来自显式可信代理的 forwarded proto 才能令

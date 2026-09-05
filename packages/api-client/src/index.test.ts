@@ -72,6 +72,31 @@ describe('KiteSyncApiClient', () => {
     );
   });
 
+  it('通过受 CSRF 保护的本机接口打开系统目录选择器', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response({
+          authenticated: true,
+          csrfToken: 'csrf-token-123456',
+          expiresAt: '2026-09-04T10:00:00.000Z',
+        }),
+      )
+      .mockResolvedValueOnce(response({ id: 'opaque-handle', label: 'Music' }));
+    const client = new KiteSyncApiClient('', fetchMock);
+
+    await client.session();
+    await expect(client.pickDirectory()).resolves.toEqual({ id: 'opaque-handle', label: 'Music' });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/directories/select',
+      expect.objectContaining({ method: 'POST', credentials: 'include' }),
+    );
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get('X-CSRF-Token')).toBe(
+      'csrf-token-123456',
+    );
+  });
+
   it('更新设备时使用指定设备路由', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       response({

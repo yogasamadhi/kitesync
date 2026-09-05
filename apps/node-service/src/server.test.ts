@@ -1,9 +1,11 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Folder } from '@kitesync/contracts';
 import type { NodeConfig } from './config.js';
+import { DirectoryBrowser } from './directory-browser.js';
 import type { FolderFiles } from './folder-files.js';
 import {
   createServer,
@@ -25,7 +27,9 @@ interface FixtureOptions {
   configure?: (store: StateStore) => Promise<void>;
   config?: Partial<NodeConfig>;
   syncthing?: Record<string, unknown>;
+  directories?: DirectoryBrowser;
   files?: FolderFiles;
+  pickDirectory?: () => Promise<string | undefined>;
   passwordHasher?: PasswordHasher;
 }
 
@@ -69,7 +73,9 @@ async function fixture(options: FixtureOptions = {}) {
     store,
     syncthing: fake,
     openSecret: 'a'.repeat(32),
+    ...(options.directories ? { directories: options.directories } : {}),
     ...(options.files ? { files: options.files } : {}),
+    ...(options.pickDirectory ? { pickDirectory: options.pickDirectory } : {}),
     passwordHasher: options.passwordHasher ?? {
       hash: async (password) => `hash:${password}`,
       verify: async (password, hash) => hash === `hash:${password}`,
@@ -111,6 +117,139 @@ afterEach(async () => {
 });
 
 describe('节点 API 认证边界', () => {
+  it('用 ETag 防止两个设置页面静默覆盖', async () => {
+    const { app } = await configuredFixture();
+    const session = await login(app);
+    const headers = { host: 'localhost:3210', cookie: session.cookie };
+    const first = await app.inject({ method: 'GET', url: '/api/v1/settings', headers });
+    expect(first.statusCode).toBe(200);
+    const etag = String(first.headers.etag);
+    expect(etag).toMatch(/^".+"$/);
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings',
+      headers: { ...headers, 'x-csrf-token': session.csrf, 'if-match': etag },
+      payload: { versioningDays: 14 },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.headers.etag).not.toBe(etag);
+    const stale = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings',
+      headers: { ...headers, 'x-csrf-token': session.csrf, 'if-match': etag },
+      payload: { versioningDays: 7 },
+    });
+    expect(stale.statusCode).toBe(412);
+    expect(stale.json()).toMatchObject({ code: 'settings_version_conflict' });
+    await app.close();
+  });
+
+  it('同步引擎不可用时仍可读取设置和诊断摘要', async () => {
+    const { app } = await configuredFixture({
+      syncthing: {
+        identity: async () => {
+          throw new Error('engine offline');
+        },
+        folders: async () => [],
+        folderStatuses: async () => [],
+      },
+    });
+    const session = await login(app);
+    const headers = { host: 'localhost:3210', cookie: session.cookie };
+    const settings = await app.inject({ method: 'GET', url: '/api/v1/settings', headers });
+    expect(settings.statusCode).toBe(200);
+    expect(settings.json()).toMatchObject({ nodeName: 'KiteSync 节点', versioningDays: 30 });
+    const diagnostics = await app.inject({
+      method: 'GET',
+      url: '/api/v1/diagnostics/summary',
+      headers,
+    });
+    expect(diagnostics.statusCode).toBe(200);
+    expect(diagnostics.json()).toMatchObject({ engine: { available: false } });
+    await app.close();
+  });
+
+  it('改密期间完成的旧密码验证不能创建新会话', async () => {
+    let releaseVerification: () => void = () => {};
+    let signalStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseVerification = resolve;
+    });
+    const { app } = await configuredFixture({
+      passwordHasher: {
+        hash: async (password) => `hash:${password}`,
+        verify: async () => {
+          signalStarted();
+          await blocked;
+          return true;
+        },
+      },
+    });
+    const pendingLogin = app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      headers: { host: 'localhost:3210' },
+      payload: { password: 'correct horse battery staple' },
+    });
+    await started;
+    const reset = await app.inject({
+      method: 'POST',
+      url: '/internal/password-reset',
+      headers: {
+        host: 'localhost:3210',
+        'x-kitesync-open-secret': 'a'.repeat(32),
+      },
+      payload: { newPassword: 'new correct horse battery staple' },
+    });
+    expect(reset.statusCode).toBe(200);
+    releaseVerification();
+    expect((await pendingLogin).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('修改密码后撤销旧会话和旧密码登录', async () => {
+    const { app } = await configuredFixture();
+    const session = await login(app);
+    const changed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/password',
+      headers: {
+        host: 'localhost:3210',
+        cookie: session.cookie,
+        'x-csrf-token': session.csrf,
+      },
+      payload: {
+        currentPassword: 'correct horse battery staple',
+        newPassword: 'new correct horse battery staple',
+      },
+    });
+    expect(changed.statusCode).toBe(200);
+    const revoked = await app.inject({
+      method: 'GET',
+      url: '/api/v1/node',
+      headers: { host: 'localhost:3210', cookie: session.cookie },
+    });
+    expect(revoked.statusCode).toBe(401);
+    const oldLogin = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      headers: { host: 'localhost:3210' },
+      payload: { password: 'correct horse battery staple' },
+    });
+    expect(oldLogin.statusCode).toBe(401);
+    const newLogin = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      headers: { host: 'localhost:3210' },
+      payload: { password: 'new correct horse battery staple' },
+    });
+    expect(newLogin.statusCode).toBe(200);
+    await app.close();
+  });
+
   it('只公开认证状态，并为本机 setup 会话授予桌面能力', async () => {
     const { app } = await fixture();
     const status = await app.inject({
@@ -157,6 +296,234 @@ describe('节点 API 认证边界', () => {
     });
     expect(updated.statusCode).toBe(200);
     expect(updated.json()).toMatchObject({ versioningDays: 7, nodeName: '测试节点' });
+    await app.close();
+  });
+
+  it('只允许桌面会话通过系统弹窗取得不透明目录句柄', async () => {
+    const root = await mkdtemp(join(tmpdir(), `kitesync-${randomUUID()}-`));
+    temporaryDirectories.push(root);
+    const music = join(root, 'Music');
+    await mkdir(music);
+    const directories = new DirectoryBrowser([root]);
+    const pickDirectory = vi
+      .fn<() => Promise<string | undefined>>()
+      .mockResolvedValueOnce(music)
+      .mockResolvedValueOnce(undefined);
+    const { app } = await fixture({ directories, pickDirectory });
+    const setup = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/setup',
+      headers: { host: 'localhost:3210' },
+      payload: { password: 'correct horse battery staple' },
+    });
+    const session = setup.json<{ csrfToken: string }>();
+    const headers = {
+      host: 'localhost:3210',
+      cookie: String(setup.headers['set-cookie']).split(';')[0],
+      'x-csrf-token': session.csrfToken,
+    };
+
+    const selected = await app.inject({
+      method: 'POST',
+      url: '/api/v1/directories/select',
+      headers,
+    });
+    expect(selected.statusCode).toBe(200);
+    expect(selected.json()).toMatchObject({ label: 'Music' });
+    const handle = selected.json<{ id: string }>().id;
+    await expect(directories.resolveSelection(handle)).resolves.toEqual({
+      path: await realpath(music),
+      label: 'Music',
+    });
+
+    const cancelled = await app.inject({
+      method: 'POST',
+      url: '/api/v1/directories/select',
+      headers,
+    });
+    expect(cancelled.statusCode).toBe(204);
+    await app.close();
+
+    const remotePicker = vi.fn(async () => music);
+    const remote = await fixture({
+      config: { hostOverride: '0.0.0.0' },
+      configure: async (store) => {
+        await store.update((draft) => {
+          draft.passwordHash = 'hash:correct horse battery staple';
+          draft.settings.lanAccessEnabled = true;
+        });
+      },
+      directories: new DirectoryBrowser([root]),
+      pickDirectory: remotePicker,
+    });
+    const remoteLogin = await remote.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      remoteAddress: '192.168.50.9',
+      headers: { host: 'localhost:3210' },
+      payload: { password: 'correct horse battery staple' },
+    });
+    expect(remoteLogin.statusCode).toBe(200);
+    const remoteSession = {
+      cookie: String(remoteLogin.headers['set-cookie']).split(';')[0],
+      csrf: remoteLogin.json<{ csrfToken: string }>().csrfToken,
+    };
+    const denied = await remote.app.inject({
+      method: 'POST',
+      url: '/api/v1/directories/select',
+      remoteAddress: '192.168.50.9',
+      headers: {
+        host: 'localhost:3210',
+        cookie: remoteSession.cookie,
+        'x-csrf-token': remoteSession.csrf,
+      },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(remotePicker).not.toHaveBeenCalled();
+    await remote.app.close();
+  });
+
+  it('解释安全标记丢失原因，并在本机确认后恢复标记和扫描', async () => {
+    const root = await mkdtemp(join(tmpdir(), `kitesync-repair-${randomUUID()}-`));
+    temporaryDirectories.push(root);
+    const folder = {
+      id: 'folder-repair',
+      label: '照片',
+      path: root,
+      markerName: '.stfolder',
+      type: 'sendreceive' as const,
+      devices: [],
+    };
+    const markerMissing = {
+      state: 'error',
+      error:
+        'folder marker missing (this indicates potential data loss, search docs/forum to get information about how to proceed)',
+      errors: 0,
+    };
+    const folderStatus = vi
+      .fn(async () => ({ state: 'idle' }))
+      .mockResolvedValueOnce(markerMissing)
+      .mockResolvedValueOnce(markerMissing);
+    const scanFolder = vi.fn(async () => undefined);
+    const { app } = await configuredFixture({
+      syncthing: {
+        folders: async () => [folder],
+        folder: async () => folder,
+        folderStatus,
+        scanFolder,
+      },
+    });
+    const session = await login(app);
+    const headers = { host: 'localhost:3210', cookie: session.cookie };
+
+    const folders = await app.inject({ method: 'GET', url: '/api/v1/folders', headers });
+    expect(folders.statusCode).toBe(200);
+    expect(folders.json<{ items: Folder[] }>().items[0]).toMatchObject({
+      state: 'error',
+      errorCode: 'marker_missing',
+      errorCount: 0,
+      error: expect.stringContaining('确认'),
+    });
+    expect(folders.body).not.toContain('search docs');
+
+    const repaired = await app.inject({
+      method: 'POST',
+      url: '/api/v1/folders/folder-repair/repair-marker',
+      headers: { ...headers, 'x-csrf-token': session.csrf },
+    });
+    expect(repaired.statusCode).toBe(200);
+    expect((await stat(join(root, '.stfolder'))).isDirectory()).toBe(true);
+    expect(scanFolder).toHaveBeenCalledWith('folder-repair');
+    await app.close();
+  });
+
+  it('返回项目、删除、本机分歧和每台共享设备的完成情况', async () => {
+    const folder = {
+      id: 'folder-progress',
+      label: '文档',
+      path: '/safe/documents',
+      type: 'receiveonly' as const,
+      devices: [{ deviceID: DEVICE_ID }, { deviceID: PEER_ID }],
+    };
+    const { app } = await configuredFixture({
+      syncthing: {
+        folders: async () => [folder],
+        folderStatus: async () => ({
+          state: 'idle',
+          needBytes: 512,
+          needTotalItems: 4,
+          needDeletes: 1,
+          receiveOnlyChangedFiles: 2,
+          receiveOnlyChangedDirectories: 1,
+          receiveOnlyChangedSymlinks: 1,
+          receiveOnlyChangedDeletes: 2,
+          receiveOnlyChangedBytes: 128,
+        }),
+        folderCompletion: async () => ({
+          completion: 95,
+          needBytes: 0,
+          needItems: 0,
+          needDeletes: 1,
+          remoteState: 'valid' as const,
+        }),
+      },
+    });
+    const session = await login(app);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/v1/folders',
+      headers: { host: 'localhost:3210', cookie: session.cookie },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ items: Folder[] }>().items[0]).toMatchObject({
+      needBytes: 512,
+      needItems: 4,
+      needDeletes: 1,
+      receiveOnlyChangedItems: 6,
+      receiveOnlyChangedBytes: 128,
+      peerProgress: [
+        {
+          deviceId: PEER_ID,
+          completion: 95,
+          needItems: 0,
+          needDeletes: 1,
+          remoteState: 'valid',
+        },
+      ],
+    });
+    await app.close();
+  });
+
+  it('忽略规则可保留已有 include，但拒绝新增外部读取入口', async () => {
+    const setFolderIgnores = vi.fn(async () => undefined);
+    const { app } = await configuredFixture({
+      syncthing: {
+        folderIgnores: async () => ({ ignore: ['#include existing.rules'] }),
+        setFolderIgnores,
+      },
+    });
+    const session = await login(app);
+    const headers = {
+      host: 'localhost:3210',
+      cookie: session.cookie,
+      'x-csrf-token': session.csrf,
+    };
+    const preserved = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/folders/folder-rules/ignores',
+      headers,
+      payload: { lines: ['#include existing.rules', '*.tmp'] },
+    });
+    expect(preserved.statusCode).toBe(200);
+    const added = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/folders/folder-rules/ignores',
+      headers,
+      payload: { lines: ['#include /etc/passwd'] },
+    });
+    expect(added.statusCode).toBe(400);
+    expect(added.json()).toMatchObject({ code: 'ignore_include_not_allowed' });
+    expect(setFolderIgnores).toHaveBeenCalledTimes(1);
     await app.close();
   });
 

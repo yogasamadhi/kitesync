@@ -44,6 +44,16 @@ const temporary = `${target.binary}.${process.pid}.tmp${target.executable.endsWi
 rmSync(temporary, { force: true });
 
 const extraTags = syncthingMetadata.buildTags.filter((tag) => tag !== 'noupgrade').join(' ');
+const platformToolchain =
+  target.platform === 'darwin'
+    ? {
+        CC: execFileSync('xcrun', ['--find', 'clang'], { encoding: 'utf8' }).trim(),
+        CXX: execFileSync('xcrun', ['--find', 'clang++'], { encoding: 'utf8' }).trim(),
+        SDKROOT: execFileSync('xcrun', ['--sdk', 'macosx', '--show-sdk-path'], {
+          encoding: 'utf8',
+        }).trim(),
+      }
+    : {};
 const args = [
   'run',
   '-mod=readonly',
@@ -69,7 +79,11 @@ const result = spawnSync('go', args, {
     ...process.env,
     BUILD_HOST: 'build.kitesync.local',
     BUILD_USER: 'kitesync',
-    CGO_ENABLED: '0',
+    CGO_ENABLED: target.cgoEnabled ? '1' : '0',
+    ...platformToolchain,
+    ...(target.platform === 'darwin'
+      ? { MACOSX_DEPLOYMENT_TARGET: syncthingMetadata.macosDeploymentTarget }
+      : {}),
     GOFLAGS: '-mod=readonly -buildvcs=false',
     GOWORK: 'off',
     SOURCE_DATE_EPOCH: String(syncthingMetadata.sourceDateEpoch),
@@ -90,7 +104,10 @@ const marker = {
   platform: target.platform,
   arch: target.arch,
   goVersion,
-  cgoEnabled: syncthingMetadata.cgoEnabled,
+  cgoEnabled: target.cgoEnabled,
+  ...(target.platform === 'darwin'
+    ? { macosDeploymentTarget: syncthingMetadata.macosDeploymentTarget }
+    : {}),
   buildTags: syncthingMetadata.buildTags,
   sha256: sha256(target.binary),
 };

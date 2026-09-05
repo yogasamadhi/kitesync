@@ -9,6 +9,13 @@
   "goSumSha256": "7e9606117eca33e9263181a3d0141e403c940c55022a061d8ed9e22d4bda2acd",
   "goVersion": "1.26.0",
   "sourceDateEpoch": 1785792965,
-  "cgoEnabled": false,
+  "macosDeploymentTarget": "13.0",
+  "cgoByTarget": {
+    "darwin-arm64": true,
+    "darwin-x64": true,
+    "linux-arm64": false,
+    "linux-x64": false,
+    "win32-x64": false
+  },
   "buildTags": ["noupgrade", "sqlite_omit_load_extension", "sqlite_dbstat"]
 }

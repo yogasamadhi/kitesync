@@ -36,6 +36,7 @@ for (const field of [
   'arch',
   'goVersion',
   'cgoEnabled',
+  'macosDeploymentTarget',
   'buildTags',
   'sha256',
 ]) {

@@ -3,21 +3,28 @@ import type {
   AcceptPendingFolderRequest,
   AuthStatus,
   AuthSession,
+  ChangePasswordRequest,
   CreateDeviceRequest,
   CreateFolderRequest,
   Device,
   DeviceList,
   DirectoryList,
   DirectoryQuery,
+  DirectoryRoot,
   DirectoryRootList,
   DiscoveredDeviceList,
   Folder,
   FolderFileList,
+  FolderConflictList,
+  FolderErrorList,
   FolderFilesQuery,
+  FolderIgnoreList,
   FolderList,
   Health,
   LoginRequest,
   MessageResponse,
+  DiagnosticLogList,
+  DiagnosticSummary,
   NodeInfo,
   NodeSettings,
   OpenTokenLoginRequest,
@@ -29,8 +36,10 @@ import type {
   SetupRequest,
   UpdateDeviceRequest,
   UpdateFolderRequest,
+  UpdateFolderIgnoresRequest,
   UpdateNodeSettings,
   VersionList,
+  VersionListQuery,
 } from '@kitesync/contracts';
 
 export class ApiError extends Error {
@@ -48,6 +57,7 @@ export class KiteSyncApiClient {
   private csrfToken: string | undefined;
   private readonly fetchImpl: typeof fetch;
   private readonly unauthorizedHandlers = new Set<() => void>();
+  private settingsEtag: string | undefined;
 
   constructor(
     private readonly baseUrl = '',
@@ -154,6 +164,9 @@ export class KiteSyncApiClient {
     }
   };
 
+  changePassword = (input: ChangePasswordRequest) =>
+    this.request<MessageResponse>('/api/v1/auth/password', this.json('POST', input));
+
   session = () =>
     this.request<AuthSession>('/api/v1/auth/session').then((session) =>
       this.rememberSession(session),
@@ -163,10 +176,19 @@ export class KiteSyncApiClient {
 
   node = () => this.request<NodeInfo>('/api/v1/node');
 
-  settings = () => this.request<NodeSettings>('/api/v1/settings');
+  settings = async () => {
+    const response = await this.raw('/api/v1/settings');
+    this.settingsEtag = response.headers.get('etag') ?? undefined;
+    return (await response.json()) as NodeSettings;
+  };
 
-  updateSettings = (input: UpdateNodeSettings) =>
-    this.request<NodeSettings>('/api/v1/settings', this.json('PATCH', input));
+  updateSettings = async (input: UpdateNodeSettings) => {
+    const init = this.json('PATCH', input);
+    if (this.settingsEtag) init.headers = { 'If-Match': this.settingsEtag };
+    const response = await this.raw('/api/v1/settings', init);
+    this.settingsEtag = response.headers.get('etag') ?? undefined;
+    return (await response.json()) as NodeSettings;
+  };
 
   devices = () => this.request<DeviceList>('/api/v1/devices');
 
@@ -247,8 +269,22 @@ export class KiteSyncApiClient {
       this.json('POST'),
     );
 
-  folderVersions = (id: string) =>
-    this.request<VersionList>(`/api/v1/folders/${encodeURIComponent(id)}/versions`);
+  repairFolderMarker = (id: string) =>
+    this.request<Folder>(
+      `/api/v1/folders/${encodeURIComponent(id)}/repair-marker`,
+      this.json('POST'),
+    );
+
+  folderVersions = (id: string, options: VersionListQuery = {}) => {
+    const query = new URLSearchParams();
+    if (options.search) query.set('search', options.search);
+    if (options.path) query.set('path', options.path);
+    query.set('limit', String(options.limit ?? 50));
+    if (options.cursor) query.set('cursor', options.cursor);
+    return this.request<VersionList>(
+      `/api/v1/folders/${encodeURIComponent(id)}/versions?${query.toString()}`,
+    );
+  };
 
   restoreFolderVersion = (id: string, input: RestoreVersionsRequest) =>
     this.request<MessageResponse>(
@@ -285,7 +321,57 @@ export class KiteSyncApiClient {
       this.json('POST', input),
     );
 
+  folderIgnores = (id: string) =>
+    this.request<FolderIgnoreList>(`/api/v1/folders/${encodeURIComponent(id)}/ignores`);
+
+  updateFolderIgnores = (id: string, input: UpdateFolderIgnoresRequest) =>
+    this.request<FolderIgnoreList>(
+      `/api/v1/folders/${encodeURIComponent(id)}/ignores`,
+      this.json('PUT', input),
+    );
+
+  folderErrors = (id: string, options: { limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.cursor) query.set('cursor', options.cursor);
+    return this.request<FolderErrorList>(
+      `/api/v1/folders/${encodeURIComponent(id)}/errors?${query.toString()}`,
+    );
+  };
+
+  folderConflicts = (id: string, options: { limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.cursor) query.set('cursor', options.cursor);
+    return this.request<FolderConflictList>(
+      `/api/v1/folders/${encodeURIComponent(id)}/conflicts?${query.toString()}`,
+    );
+  };
+
+  overrideFolder = (id: string) =>
+    this.request<MessageResponse>(
+      `/api/v1/folders/${encodeURIComponent(id)}/override`,
+      this.json('POST'),
+    );
+
+  revertFolder = (id: string) =>
+    this.request<MessageResponse>(
+      `/api/v1/folders/${encodeURIComponent(id)}/revert`,
+      this.json('POST'),
+    );
+
+  diagnosticLogs = (options: { limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.cursor) query.set('cursor', options.cursor);
+    return this.request<DiagnosticLogList>(`/api/v1/diagnostics/logs?${query.toString()}`);
+  };
+
+  diagnosticSummary = () => this.request<DiagnosticSummary>('/api/v1/diagnostics/summary');
+
+  diagnosticExportUrl = () => this.url('/api/v1/diagnostics/export');
+
   directoryRoots = () => this.request<DirectoryRootList>('/api/v1/directory-roots');
+
+  pickDirectory = () =>
+    this.request<DirectoryRoot | undefined>('/api/v1/directories/select', this.json('POST'));
 
   directories = (parentId: string, options: Omit<DirectoryQuery, 'parentId'> = {}) => {
     const query = new URLSearchParams({ parentId, limit: String(options.limit ?? 100) });

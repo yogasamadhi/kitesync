@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createSocket } from 'node:dgram';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NodeConfig } from './config.js';
 import {
   hardenSyncthingXml,
+  folderPathRelation,
   listenerHasBindError,
   loadOrCreateSyncthingApiKey,
   LocalSyncthing,
@@ -23,6 +24,44 @@ function containsControlCharacter(value: string) {
 }
 
 describe('Syncthing 离线安全配置', () => {
+  it('拒绝同一目录和父子目录重叠，同时允许同级目录', () => {
+    expect(folderPathRelation('/data/photos', '/data/photos')).toBe('same');
+    expect(folderPathRelation('/data', '/data/photos')).toBe('ancestor');
+    expect(folderPathRelation('/data/photos/2026', '/data/photos')).toBe('descendant');
+    expect(folderPathRelation('/data/photos', '/data/music')).toBeUndefined();
+  });
+
+  it('串行检查并发创建，不能同时写入重叠目录', async () => {
+    const root = await mkdtemp(join(tmpdir(), `kitesync-overlap-${randomUUID()}-`));
+    const child = join(root, 'child');
+    await mkdir(child);
+    try {
+      const syncthing = new LocalSyncthing({} as NodeConfig);
+      const folders: Array<{ id: string; label: string; path: string }> = [];
+      vi.spyOn(
+        syncthing as unknown as {
+          request: (path: string, init?: RequestInit) => Promise<unknown>;
+        },
+        'request',
+      ).mockImplementation(async (path, init) => {
+        if (path === '/rest/config/folders' && !init?.method) return structuredClone(folders);
+        if (init?.method === 'PUT') {
+          folders.push(JSON.parse(String(init.body)) as (typeof folders)[number]);
+          return undefined;
+        }
+        throw new Error(`unexpected request: ${path}`);
+      });
+      const results = await Promise.allSettled([
+        syncthing.putFolderChecked({ id: 'root', label: '根目录', path: root }),
+        syncthing.putFolderChecked({ id: 'child', label: '子目录', path: child }),
+      ]);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+      expect(folders).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it('只把实际绑定到指定端口 loopback 的 GUI/REST 视为可接管', () => {
     expect(loopbackGuiAddress('127.0.0.1:8385', 8385)).toBe(true);
     expect(loopbackGuiAddress('127.0.0.2:8385', 8385)).toBe(true);

@@ -25,7 +25,12 @@ function RootShell() {
 
 const rootRoute = createRootRoute({ component: RootShell });
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: '/', component: App });
-const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute]) });
+const applicationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '$',
+  component: App,
+});
+const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, applicationRoute]) });
 
 declare module '@tanstack/react-router' {
   interface Register {

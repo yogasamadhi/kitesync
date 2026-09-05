@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { loadConfig, type NodeConfig } from './config.js';
 import { DirectoryBrowser } from './directory-browser.js';
+import { DiagnosticLog } from './diagnostic-log.js';
 import { FolderFiles } from './folder-files.js';
 import { InstanceLock, readLockedPid } from './instance-lock.js';
 import { SecretStore } from './secret-store.js';
@@ -28,6 +29,7 @@ const HELP = `KiteSync 局域网文件同步节点
 命令：
   open                         启动节点（如需要）并在浏览器中打开
   setup [--system]             交互式设置（--system 用于 Linux 常驻节点）
+  password reset [--system]    在本机交互式重置管理员密码
   serve                        在前台运行节点服务
   identity                     输出本机 Syncthing 身份信息
   service install [--user|--system]   安装并启动平台自启动服务
@@ -159,10 +161,12 @@ export async function runServe(config: NodeConfig) {
   try {
     const store = await StateStore.open(config.statePath, config.portOverride ?? 3210);
     const secrets = new SecretStore(config.stateDirectory);
-    syncthing = new LocalSyncthing(config);
+    const diagnostics = new DiagnosticLog(join(config.stateDirectory, 'logs', 'node.log'));
+    syncthing = new LocalSyncthing(config, (level, message) => diagnostics.write(level, message));
     const runtime = createServerRuntime();
     const directories = new DirectoryBrowser(config.directoryRoots);
     const files = new FolderFiles();
+    diagnostics.write('info', `KiteSync ${config.version} 节点服务启动`);
     let stopping = false;
     let wake: ((reason: 'rebind' | 'stop') => void) | undefined;
     const stop = () => {
@@ -196,6 +200,7 @@ export async function runServe(config: NodeConfig) {
             runtime,
             directories,
             files,
+            diagnostics,
             onRebindRequested: requestRebind,
           });
           try {
@@ -375,6 +380,53 @@ async function runInteractiveSetup(config: NodeConfig) {
   } finally {
     await stopManaged(temporaryService);
   }
+}
+
+async function runPasswordReset(config: NodeConfig) {
+  const password = await hiddenPassword('输入新管理员密码：');
+  if (password.length < 12 || password.length > 256) {
+    throw new Error('管理员密码必须为 12 到 256 个字符');
+  }
+  const confirmation = await hiddenPassword('再次输入新管理员密码：');
+  if (password !== confirmation) throw new Error('两次输入的密码不一致');
+  const store = await StateStore.open(config.statePath, config.portOverride ?? 3210);
+  const port = runtimePort(config, store);
+  const secret = await new SecretStore(config.stateDirectory).openSecret();
+  if (await healthy(port, secret)) {
+    const response = await fetch(`http://127.0.0.1:${port}/internal/password-reset`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-KiteSync-Open-Secret': secret,
+      },
+      body: JSON.stringify({ newPassword: password }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const problem = (await response.json().catch(() => undefined)) as
+        { detail?: string } | undefined;
+      throw new Error(problem?.detail ?? '运行中的节点拒绝密码重置');
+    }
+    console.log('管理员密码已重置，全部旧会话已撤销');
+    return;
+  }
+  if (await readLockedPid(config.lockPath)) {
+    throw new Error('节点正在启动但内部接口尚未就绪，请稍后重试');
+  }
+  const lock = await InstanceLock.acquire(config.lockPath);
+  try {
+    const hash = await Bun.password.hash(password, {
+      algorithm: 'argon2id',
+      memoryCost: 65_536,
+      timeCost: 3,
+    });
+    await store.update((draft) => {
+      draft.passwordHash = hash;
+    });
+  } finally {
+    await lock.release();
+  }
+  console.log('管理员密码已重置；节点身份、配对和同步目录保持不变');
 }
 
 async function runOpen(config: NodeConfig, managed = false) {
@@ -757,7 +809,8 @@ export async function main(argv = process.argv.slice(2)) {
   const systemScope =
     process.platform === 'linux' &&
     ((action === 'service' && argv.includes('--system')) ||
-      (action === 'setup' && argv[1] === '--system'));
+      (action === 'setup' && argv[1] === '--system') ||
+      (action === 'password' && argv[1] === 'reset' && argv[2] === '--system'));
   if (systemScope && !process.env.KITESYNC_STATE_DIR) {
     process.env.KITESYNC_STATE_DIR = '/var/lib/kitesync';
   }
@@ -787,6 +840,22 @@ export async function main(argv = process.argv.slice(2)) {
       : runOpen(config);
   }
   if (action === 'identity') return runIdentity(config);
+  if (action === 'password') {
+    if (
+      argv[1] !== 'reset' ||
+      argv.slice(2).some((value) => value !== '--system') ||
+      argv.slice(2).length > 1
+    ) {
+      throw new Error('用法：kitesync password reset [--system]');
+    }
+    if (argv.includes('--system') && process.platform !== 'linux') {
+      throw new Error('--system 仅用于 Linux 常驻节点');
+    }
+    if (argv.includes('--system') && process.getuid?.() === 0) {
+      throw new Error('请以服务用户运行：sudo -u kitesync kitesync password reset --system');
+    }
+    return runPasswordReset(config);
+  }
   if (action === 'service') return runService(config, argv.slice(1));
   throw new Error(`未知命令：${action}\n\n${HELP}`);
 }

@@ -22,6 +22,11 @@
 5. 签 installer，notarize 并 staple；
 6. 生成校验和、SBOM 和来源说明后发布。
 
+macOS 两种架构必须在 Xcode 原生 runner 上以 CGO 开启、
+`MACOSX_DEPLOYMENT_TARGET=13.0` 构建。缓存键和 `SYNCTHING_BUILD.json` 必须包含该策略；使用
+`otool -l` 核对最终 sidecar 的 `LC_BUILD_VERSION minos 13.0`。Windows/Linux 继续使用各自目标
+的关闭 CGO 策略。
+
 跨平台 compile 可以用于预检，但正式签名、公证、installer 构建和 smoke 必须在目标平台的原生
 runner 上完成。
 
@@ -60,6 +65,7 @@ sha256sum --check SHA256SUMS
 - 覆盖升级保持 Device ID、folders 和设置；默认卸载保留数据；
 - Windows Authenticode、Private profile 防火墙和任务失败重启验证通过；
 - macOS Gatekeeper、SMAppService、hardened runtime、公证和 staple 验证通过；
+- macOS x64/arm64 均在不调用 scan API 的条件下验证新增、修改和删除文件能被 watcher 自动同步；
 - Linux user/system service 互斥及升级验证通过；
 - 两台不同平台节点在无中心服务、global discovery 和 Relay 时完成发现/静态地址配对与同步；
 - 文件 API 的 traversal、编码、symlink/junction、隐藏元数据、分页、Range 和鉴权测试通过；

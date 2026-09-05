@@ -23,6 +23,12 @@ export const NodeInfoSchema = Type.Object(
     localDiscoveryEnabled: Type.Boolean(),
     connectedPeers: Type.Integer({ minimum: 0 }),
     canRevealFiles: Type.Boolean(),
+    canPickDirectories: Type.Boolean(),
+    engineStatus: Type.Optional(
+      Type.Union([Type.Literal('ok'), Type.Literal('degraded'), Type.Literal('unavailable')]),
+    ),
+    engineError: Type.Optional(Type.Union([Type.String({ maxLength: 1024 }), Type.Null()])),
+    statusUpdatedAt: Type.Optional(IsoDateTimeSchema),
   },
   { $id: 'NodeInfo', additionalProperties: false },
 );

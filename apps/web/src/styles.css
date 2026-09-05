@@ -430,6 +430,203 @@ button:disabled {
   box-shadow: 0 0 0 4px #3ac3941e;
 }
 
+.status-dot--error {
+  background: #d95a60;
+  box-shadow: 0 0 0 4px #d95a6026;
+}
+
+.header-actions,
+.list-toolbar,
+.password-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.identity-chip,
+.header-lock {
+  border: 1px solid #d5dce3;
+  border-radius: 9px;
+  background: #fff;
+  color: #334256;
+  padding: 9px 12px;
+  white-space: nowrap;
+}
+
+.stale-banner,
+.notice-banner,
+.conflict-card {
+  margin-bottom: 16px;
+  border-color: #e9c879;
+  background: #fff7df;
+  color: #795617;
+}
+
+.stale-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.stale-banner span {
+  flex: 1;
+  font-size: 12px;
+}
+
+.notice-banner {
+  border: 1px solid #e9c879;
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.field-error {
+  color: #a52e36;
+}
+
+.success-message {
+  border-radius: 8px;
+  background: #def4ea;
+  color: #087054;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.folder-list-heading .ks-button {
+  margin-left: auto;
+}
+
+.list-toolbar {
+  margin-bottom: 10px;
+}
+
+.list-toolbar input {
+  flex: 1;
+}
+
+.list-toolbar select {
+  width: 140px;
+}
+
+.folder-list-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(150px, auto);
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  border: 1px solid #e0e5ea;
+  border-radius: 12px;
+  background: #fff;
+  color: inherit;
+  padding: 13px 16px;
+  text-align: left;
+}
+
+.folder-list-row:hover,
+.folder-list-row.active {
+  border-color: #3da88b;
+  background: #f7fcfa;
+}
+
+.folder-list-row > span:nth-child(2) {
+  min-width: 0;
+  display: grid;
+}
+
+.folder-list-row small,
+.folder-list-row em {
+  overflow: hidden;
+  color: #758193;
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-list-row em {
+  text-align: right;
+}
+
+.folder-menu {
+  position: relative;
+}
+
+.folder-menu summary {
+  list-style: none;
+  padding: 9px 13px;
+}
+
+.folder-menu > div {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  display: grid;
+  min-width: 150px;
+  border: 1px solid #dbe1e5;
+  border-radius: 9px;
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 10px 26px #1c314526;
+}
+
+.folder-menu button {
+  border: 0;
+  background: transparent;
+  padding: 9px;
+  text-align: left;
+}
+
+.folder-setting-section {
+  margin-top: 20px;
+  border-top: 1px solid #edf0f3;
+  padding-top: 18px;
+}
+
+.folder-setting-section h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.folder-setting-section > p {
+  color: #748194;
+  font-size: 12px;
+}
+
+.ignore-editor {
+  margin-bottom: 10px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+.error-row,
+.diagnostic-logs > div {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.4fr) minmax(0, 1fr);
+  gap: 14px;
+  border-top: 1px solid #edf0f3;
+  padding: 9px 0;
+  font-size: 12px;
+}
+
+.diagnostic-logs {
+  margin-top: 14px;
+}
+
+.diagnostic-logs time {
+  color: #758193;
+}
+
+.password-form {
+  margin-top: 18px;
+}
+
+.password-form label {
+  flex: 1;
+}
+
+.overview-grid--single {
+  grid-template-columns: 1fr;
+}
+
 .logout-button {
   border: 0;
   background: transparent;
@@ -1192,8 +1389,80 @@ button:disabled {
   background: #23a67e;
 }
 
+.peer-progress-list {
+  margin: 0 24px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+
+.peer-progress-list summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.peer-progress-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.peer-progress-list > div:first-of-type {
+  margin-top: 8px;
+}
+
+.peer-progress-list span:first-child {
+  display: grid;
+}
+
 .folder-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
   margin: 0 22px 15px;
+}
+
+.folder-error-copy {
+  min-width: 0;
+}
+
+.folder-error-copy strong {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.folder-error-copy p,
+.folder-error-copy small {
+  display: block;
+  margin: 0;
+  line-height: 1.55;
+}
+
+.folder-error-copy small {
+  margin-top: 4px;
+  color: #80545a;
+}
+
+.folder-error-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.folder-error-actions > button:not(.ks-button) {
+  border: 1px solid #e5bcc0;
+  border-radius: 7px;
+  background: #fff;
+  color: #92353c;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .folder-tabs {
@@ -1577,6 +1846,15 @@ button:disabled {
     grid-column: 2;
   }
 
+  .folder-error {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .folder-error-actions {
+    justify-content: flex-start;
+  }
+
   .three-columns {
     grid-template-columns: 1fr;
   }
@@ -1710,6 +1988,24 @@ button:disabled {
     align-items: flex-end;
     flex-direction: column;
   }
+
+  .folder-list-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .folder-list-row em {
+    grid-column: 2 / 4;
+    text-align: left;
+  }
+
+  .header-actions .identity-chip {
+    display: none;
+  }
+
+  .password-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 480px) {
@@ -1717,8 +2013,17 @@ button:disabled {
     padding-inline: 6px;
   }
 
-  .page-header .secondary-button {
-    display: none;
+  .page-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .header-actions .secondary-button {
+    flex: 1;
   }
 
   .ks-card {
@@ -1745,6 +2050,15 @@ button:disabled {
     text-align: left;
   }
 
+  .peer-progress-list {
+    margin-inline: 15px;
+  }
+
+  .peer-progress-list > div {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .file-browser,
   .versions-panel,
   .folder-settings {
@@ -1753,5 +2067,32 @@ button:disabled {
 
   .file-actions button {
     max-width: 74px;
+  }
+
+  .folder-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(max-content, 1fr)) auto;
+    white-space: nowrap;
+  }
+
+  .folder-list-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .folder-list-row > .folder-icon {
+    display: none;
+  }
+
+  .folder-list-row em {
+    grid-column: 1 / 3;
+  }
+
+  .list-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .list-toolbar select {
+    width: 100%;
   }
 }

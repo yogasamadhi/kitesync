@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, Card, EmptyState } from '@kitesync/ui';
 import type {
@@ -9,10 +9,12 @@ import type {
   UpdateDeviceRequest,
 } from '@kitesync/contracts';
 import { api } from './api.js';
+import { confirmDiscardChanges, useUnsavedChanges } from './unsaved-changes.js';
 
 export function DevicesPanel({ node }: { node: NodeInfo }) {
   const queryClient = useQueryClient();
   const [copied, setCopied] = useState(false);
+  const [message, setMessage] = useState('');
   const devices = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const discovered = useQuery({
     queryKey: ['devices', 'discovered'],
@@ -21,19 +23,43 @@ export function DevicesPanel({ node }: { node: NodeInfo }) {
   const pending = useQuery({ queryKey: ['devices', 'pending'], queryFn: api.pendingDevices });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ['devices'] });
 
-  const add = useMutation({ mutationFn: api.createDevice, onSuccess: refresh });
+  const add = useMutation({
+    mutationFn: api.createDevice,
+    onSuccess: () => {
+      setMessage('设备已添加，正在等待对方确认或连接');
+      refresh();
+    },
+  });
   const accept = useMutation({
     mutationFn: ({ id, name }: { id: string; name?: string }) =>
       api.acceptPendingDevice(id, name ? { name } : {}),
-    onSuccess: refresh,
+    onSuccess: () => {
+      setMessage('设备已确认，正在建立连接');
+      refresh();
+    },
   });
-  const reject = useMutation({ mutationFn: api.rejectPendingDevice, onSuccess: refresh });
+  const reject = useMutation({
+    mutationFn: api.rejectPendingDevice,
+    onSuccess: () => {
+      setMessage('设备请求已拒绝并忽略');
+      refresh();
+    },
+  });
   const update = useMutation({
     mutationFn: ({ id, input }: { id: string; input: UpdateDeviceRequest }) =>
       api.updateDevice(id, input),
-    onSuccess: refresh,
+    onSuccess: () => {
+      setMessage('设备设置已保存');
+      refresh();
+    },
   });
-  const remove = useMutation({ mutationFn: api.removeDevice, onSuccess: refresh });
+  const remove = useMutation({
+    mutationFn: api.removeDevice,
+    onSuccess: () => {
+      setMessage('设备已移除，对方已有文件未被删除');
+      refresh();
+    },
+  });
   const unignore = useMutation({ mutationFn: api.unignoreDevice, onSuccess: refresh });
 
   const mutationError =
@@ -69,9 +95,18 @@ export function DevicesPanel({ node }: { node: NodeInfo }) {
 
   return (
     <div className="stack">
+      {devices.isError && devices.data && (
+        <div className="stale-banner" role="alert">
+          <strong>设备状态暂时无法更新，以下为旧数据</strong>
+          <span>最后成功：{new Date(devices.dataUpdatedAt).toLocaleString('zh-CN')}</span>
+          <button className="ghost-button" onClick={() => void devices.refetch()}>
+            重新连接
+          </button>
+        </div>
+      )}
       <Card className="identity-card">
         <div>
-          <p className="eyebrow">本机身份</p>
+          <p className="eyebrow">{node.name} 的身份</p>
           <h2>让另一台设备添加此 ID</h2>
           <p>两边都确认设备后才会建立同步连接。</p>
         </div>
@@ -196,6 +231,11 @@ export function DevicesPanel({ node }: { node: NodeInfo }) {
       {(queryError || mutationError) && (
         <p className="form-error">{errorMessage(queryError ?? mutationError)}</p>
       )}
+      {message && (
+        <p className="success-message" role="status" aria-live="polite">
+          {message}
+        </p>
+      )}
     </div>
   );
 }
@@ -216,6 +256,28 @@ function PairedDeviceCard({
   const [addresses, setAddresses] = useState(
     device.addresses.filter((address) => address !== 'dynamic').join('\n'),
   );
+  const [dirty, setDirty] = useState<Set<'name' | 'addresses'>>(() => new Set());
+  const [remoteChanged, setRemoteChanged] = useState(false);
+  const serverAddresses = device.addresses.filter((address) => address !== 'dynamic').join('\n');
+  const source = useRef({ name: device.name, addresses: serverAddresses });
+  useUnsavedChanges(editing && dirty.size > 0);
+
+  useEffect(() => {
+    if (!editing) {
+      setName(device.name);
+      setAddresses(serverAddresses);
+      setDirty((current) => (current.size === 0 ? current : new Set()));
+      setRemoteChanged(false);
+    } else if (
+      source.current.name !== device.name ||
+      source.current.addresses !== serverAddresses
+    ) {
+      setName((current) => (dirty.has('name') ? current : device.name));
+      setAddresses((current) => (dirty.has('addresses') ? current : serverAddresses));
+      setRemoteChanged(true);
+    }
+    source.current = { name: device.name, addresses: serverAddresses };
+  }, [device.name, dirty, editing, serverAddresses]);
 
   function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -223,7 +285,20 @@ function PairedDeviceCard({
       .split(/[\n,]/)
       .map((value) => value.trim())
       .filter(Boolean);
-    onUpdate({ name: name.trim(), addresses: nextAddresses });
+    const input: UpdateDeviceRequest = {};
+    if (dirty.has('name')) input.name = name.trim();
+    if (dirty.has('addresses')) input.addresses = nextAddresses;
+    if (Object.keys(input).length) onUpdate(input);
+    setEditing(false);
+  }
+
+  function mark(key: 'name' | 'addresses', changed: boolean) {
+    setDirty((current) => {
+      const next = new Set(current);
+      if (changed) next.add(key);
+      else next.delete(key);
+      return next;
+    });
   }
 
   return (
@@ -260,7 +335,10 @@ function PairedDeviceCard({
         <button
           className="ghost-button"
           disabled={busy}
-          onClick={() => setEditing((open) => !open)}
+          onClick={() => {
+            if (editing && dirty.size && !confirmDiscardChanges()) return;
+            setEditing((open) => !open);
+          }}
         >
           {editing ? '收起' : '编辑'}
         </button>
@@ -288,7 +366,11 @@ function PairedDeviceCard({
               required
               maxLength={64}
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setName(value);
+                mark('name', value.trim() !== device.name);
+              }}
             />
           </label>
           <label>
@@ -297,10 +379,24 @@ function PairedDeviceCard({
               rows={2}
               value={addresses}
               placeholder="留空使用 dynamic，或每行填写一个 tcp://IP:port"
-              onChange={(event) => setAddresses(event.target.value)}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setAddresses(value);
+                mark(
+                  'addresses',
+                  value
+                    .split(/[\n,]/)
+                    .map((address) => address.trim())
+                    .filter(Boolean)
+                    .join('\n') !== serverAddresses,
+                );
+              }}
             />
           </label>
           <Button disabled={busy || !name.trim()}>{busy ? '正在保存…' : '保存修改'}</Button>
+          {remoteChanged && (
+            <p className="notice-banner">设备信息在编辑期间发生变化，请核对草稿。</p>
+          )}
         </form>
       )}
     </Card>

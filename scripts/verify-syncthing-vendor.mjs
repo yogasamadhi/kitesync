@@ -10,7 +10,8 @@ const buildScript = readFileSync(resolve(repositoryRoot, 'scripts/build-syncthin
 for (const required of [
   "'-no-upgrade'",
   "GOFLAGS: '-mod=readonly -buildvcs=false'",
-  "CGO_ENABLED: '0'",
+  "CGO_ENABLED: target.cgoEnabled ? '1' : '0'",
+  'MACOSX_DEPLOYMENT_TARGET: syncthingMetadata.macosDeploymentTarget',
   'SOURCE_DATE_EPOCH',
 ]) {
   if (!buildScript.includes(required)) {

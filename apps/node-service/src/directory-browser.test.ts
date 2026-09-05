@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DirectoryBrowser } from './directory-browser.js';
 
@@ -35,5 +35,23 @@ describe('本机目录选择', () => {
 
     const secondAgain = await browser.list(rootId!, 1, secondCursor);
     expect(secondAgain.items).toEqual(second.items);
+  });
+
+  it('把系统选择结果转换为受范围约束的不透明目录句柄', async () => {
+    const root = await temporaryDirectory();
+    const selectedPath = join(root, 'Music');
+    await mkdir(selectedPath);
+    const browser = new DirectoryBrowser([root]);
+
+    const selected = await browser.registerSelection(selectedPath);
+    expect(selected).toMatchObject({ label: 'Music' });
+    expect(selected.id).not.toContain(selectedPath);
+    await expect(browser.resolveSelection(selected.id)).resolves.toEqual({
+      path: await realpath(selectedPath),
+      label: 'Music',
+    });
+
+    const outside = await temporaryDirectory();
+    await expect(browser.registerSelection(outside)).rejects.toThrow('超出允许范围');
   });
 });

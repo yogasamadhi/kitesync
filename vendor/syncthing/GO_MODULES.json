@@ -6,7 +6,6 @@
     "commit": "946e2b83a1f6c6ae119427c09e0a5802940b82ff",
     "tree": "70a7d277758efa38c6732191cf703fc9af8ae320",
     "package": "./cmd/syncthing",
-    "cgoEnabled": false,
     "buildTags": [
       "noupgrade",
       "sqlite_omit_load_extension",
@@ -17,27 +16,32 @@
     {
       "id": "darwin-amd64",
       "goos": "darwin",
-      "goarch": "amd64"
+      "goarch": "amd64",
+      "cgoEnabled": true
     },
     {
       "id": "darwin-arm64",
       "goos": "darwin",
-      "goarch": "arm64"
+      "goarch": "arm64",
+      "cgoEnabled": true
     },
     {
       "id": "linux-amd64",
       "goos": "linux",
-      "goarch": "amd64"
+      "goarch": "amd64",
+      "cgoEnabled": false
     },
     {
       "id": "linux-arm64",
       "goos": "linux",
-      "goarch": "arm64"
+      "goarch": "arm64",
+      "cgoEnabled": false
     },
     {
       "id": "windows-amd64",
       "goos": "windows",
-      "goarch": "amd64"
+      "goarch": "amd64",
+      "cgoEnabled": false
     }
   ],
   "modules": [
@@ -254,8 +258,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"
@@ -595,9 +597,24 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "windows-amd64"
+      ]
+    },
+    {
+      "path": "github.com/mattn/go-sqlite3",
+      "version": "v1.14.48",
+      "sum": "h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=",
+      "replacement": null,
+      "license": "MIT",
+      "licenseFiles": [
+        {
+          "path": "LICENSE",
+          "sha256": "afa48e5e64dc610298d80b010ae7a3450f61a79500a9f1d1697ff6dcbbfa1f72"
+        }
+      ],
+      "targets": [
+        "darwin-amd64",
+        "darwin-arm64"
       ]
     },
     {
@@ -653,8 +670,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "windows-amd64"
       ]
     },
@@ -884,8 +899,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"
@@ -1004,6 +1017,8 @@
         }
       ],
       "targets": [
+        "darwin-amd64",
+        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"
@@ -1345,8 +1360,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"
@@ -1365,8 +1378,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"
@@ -1397,8 +1408,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"
@@ -1417,8 +1426,6 @@
         }
       ],
       "targets": [
-        "darwin-amd64",
-        "darwin-arm64",
         "linux-amd64",
         "linux-arm64",
         "windows-amd64"

@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, opendir, realpath, stat } from 'node:fs/promises';
+import { lstat, open, opendir, readdir, realpath, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, sep } from 'node:path';
-import type { FolderFileList } from '@kitesync/contracts';
+import type { FolderConflictList, FolderFileList } from '@kitesync/contracts';
 import { isWithinRoot } from './directory-browser.js';
 
 interface Cursor {
@@ -136,6 +136,73 @@ export class FolderFiles {
       await handle.close().catch(() => undefined);
       throw error;
     }
+  }
+
+  async conflicts(
+    folderId: string,
+    configuredRoot: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<FolderConflictList> {
+    const { root } = await this.resolve(configuredRoot, '', true);
+    const cursorPath = '__conflicts__';
+    const offset = this.consumeCursor(folderId, cursorPath, cursor);
+    const items: FolderConflictList['items'] = [];
+    let matched = 0;
+    let hasMore = false;
+    const directories = [''];
+    while (directories.length && !hasMore) {
+      const relativeDirectory = directories.pop() ?? '';
+      const absoluteDirectory = relativeDirectory ? join(root, relativeDirectory) : root;
+      const entries = (await readdir(absoluteDirectory, { withFileTypes: true })).sort((a, b) =>
+        a.name.localeCompare(b.name),
+      );
+      for (const entry of entries) {
+        if (!visible(entry.name) || entry.isSymbolicLink()) continue;
+        const relative = relativeDirectory ? join(relativeDirectory, entry.name) : entry.name;
+        if (entry.isDirectory()) {
+          directories.push(relative);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const conflict = /^(.*)\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}(.*)$/i.exec(entry.name);
+        if (!conflict) continue;
+        if (matched < offset) {
+          matched += 1;
+          continue;
+        }
+        if (items.length >= limit) {
+          hasMore = true;
+          break;
+        }
+        const absolute = join(root, relative);
+        const info = await lstat(absolute);
+        const originalName = `${conflict[1] ?? ''}${conflict[2] ?? ''}`;
+        const originalRelative = relativeDirectory
+          ? join(relativeDirectory, originalName)
+          : originalName;
+        let originalPath: string | null = null;
+        try {
+          const original = await lstat(join(root, originalRelative));
+          if (original.isFile() && !original.isSymbolicLink()) {
+            originalPath = originalRelative.split(sep).join('/');
+          }
+        } catch {
+          // A conflict copy can remain after its presumed original was removed.
+        }
+        items.push({
+          conflictPath: relative.split(sep).join('/'),
+          originalPath,
+          size: Math.max(0, info.size),
+          modifiedAt: info.mtime.toISOString(),
+        });
+        matched += 1;
+      }
+    }
+    return {
+      items,
+      nextCursor: hasMore ? this.issueCursor(folderId, cursorPath, offset + items.length) : null,
+    };
   }
 
   async reveal(configuredRoot: string, relativePath: string) {

@@ -17,11 +17,11 @@ export const goModuleNoticesPath = resolve(
 );
 
 export const goModuleTargets = [
-  { id: 'darwin-amd64', goos: 'darwin', goarch: 'amd64' },
-  { id: 'darwin-arm64', goos: 'darwin', goarch: 'arm64' },
-  { id: 'linux-amd64', goos: 'linux', goarch: 'amd64' },
-  { id: 'linux-arm64', goos: 'linux', goarch: 'arm64' },
-  { id: 'windows-amd64', goos: 'windows', goarch: 'amd64' },
+  { id: 'darwin-amd64', markerId: 'darwin-x64', goos: 'darwin', goarch: 'amd64' },
+  { id: 'darwin-arm64', markerId: 'darwin-arm64', goos: 'darwin', goarch: 'arm64' },
+  { id: 'linux-amd64', markerId: 'linux-x64', goos: 'linux', goarch: 'amd64' },
+  { id: 'linux-arm64', markerId: 'linux-arm64', goos: 'linux', goarch: 'arm64' },
+  { id: 'windows-amd64', markerId: 'win32-x64', goos: 'windows', goarch: 'amd64' },
 ];
 
 // Each entry is an explicit legal review decision. A dependency update or a new
@@ -56,6 +56,7 @@ const reviewedLicenses = {
   'github.com/julienschmidt/httprouter': 'BSD-3-Clause',
   'github.com/kballard/go-shellquote': 'MIT',
   'github.com/mattn/go-isatty': 'MIT',
+  'github.com/mattn/go-sqlite3': 'MIT',
   'github.com/miscreant/miscreant.go': 'MIT',
   'github.com/munnerz/goautoneg': 'BSD-3-Clause',
   'github.com/ncruces/go-strftime': 'MIT',
@@ -162,7 +163,7 @@ function listTargetModules(target) {
       maxBuffer: 64 * 1024 * 1024,
       env: {
         ...process.env,
-        CGO_ENABLED: '0',
+        CGO_ENABLED: syncthingMetadata.cgoByTarget[target.markerId] ? '1' : '0',
         GOARCH: target.goarch,
         GOFLAGS: '-mod=readonly -buildvcs=false',
         GOOS: target.goos,
@@ -284,10 +285,14 @@ export function collectGoModuleArtifacts() {
       commit: syncthingMetadata.commit,
       tree: syncthingMetadata.tree,
       package: './cmd/syncthing',
-      cgoEnabled: false,
       buildTags: syncthingMetadata.buildTags,
     },
-    targets: goModuleTargets.map(({ id, goos, goarch }) => ({ id, goos, goarch })),
+    targets: goModuleTargets.map(({ id, markerId, goos, goarch }) => ({
+      id,
+      goos,
+      goarch,
+      cgoEnabled: syncthingMetadata.cgoByTarget[markerId],
+    })),
     modules: normalized.map((module) => ({
       path: module.path,
       version: module.version,

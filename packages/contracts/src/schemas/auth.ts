@@ -24,6 +24,23 @@ export const LoginRequestSchema = Type.Object(
 
 export type LoginRequest = Static<typeof LoginRequestSchema>;
 
+export const ChangePasswordRequestSchema = Type.Object(
+  {
+    currentPassword: Type.String({ minLength: 1, maxLength: 256 }),
+    newPassword: PasswordSchema,
+  },
+  { $id: 'ChangePasswordRequest', additionalProperties: false },
+);
+
+export type ChangePasswordRequest = Static<typeof ChangePasswordRequestSchema>;
+
+export const ResetPasswordRequestSchema = Type.Object(
+  { newPassword: PasswordSchema },
+  { $id: 'ResetPasswordRequest', additionalProperties: false },
+);
+
+export type ResetPasswordRequest = Static<typeof ResetPasswordRequestSchema>;
+
 export const OpenTokenLoginRequestSchema = Type.Object(
   { token: Type.String({ minLength: 16, maxLength: 512 }) },
   { $id: 'OpenTokenLoginRequest', additionalProperties: false },

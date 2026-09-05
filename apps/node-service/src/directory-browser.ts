@@ -143,6 +143,22 @@ export class DirectoryBrowser {
     return { path, label: handle.label };
   }
 
+  async registerSelection(path: string): Promise<DirectoryRoot> {
+    if (!isAbsolute(path)) throw new Error('系统目录选择器返回了无效路径');
+    const canonical = await realpath(path);
+    if (!(await stat(canonical)).isDirectory()) throw new Error('选择的路径不是目录');
+
+    let root = canonical;
+    if (this.configuredRoots) {
+      const allowedRoots = await availableRoots(this.configuredRoots);
+      const allowed = allowedRoots.find((candidate) => isWithinRoot(candidate.path, canonical));
+      if (!allowed) throw new Error('选择的目录超出允许范围');
+      root = allowed.path;
+    }
+    const label = (basename(canonical) || canonical).slice(0, 128);
+    return { id: this.addHandle(canonical, root, label), label };
+  }
+
   private addHandle(path: string, root: string, label: string) {
     this.purgeExpired();
     const key = `${root}\0${path}`;

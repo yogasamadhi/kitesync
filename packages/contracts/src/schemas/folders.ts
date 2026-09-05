@@ -19,6 +19,53 @@ export const FolderStateSchema = Type.Union([
 
 export type FolderState = Static<typeof FolderStateSchema>;
 
+export const FolderErrorCodeSchema = Type.Union([
+  Type.Literal('marker_missing'),
+  Type.Literal('path_missing'),
+  Type.Literal('access_denied'),
+  Type.Literal('disk_full'),
+  Type.Literal('watch_failed'),
+  Type.Literal('file_errors'),
+  Type.Literal('status_unavailable'),
+  Type.Literal('unknown'),
+]);
+
+export type FolderErrorCode = Static<typeof FolderErrorCodeSchema>;
+
+export const FolderPeerProgressSchema = Type.Object(
+  {
+    deviceId: DeviceIdSchema,
+    completion: Type.Number({ minimum: 0, maximum: 100 }),
+    needBytes: Type.Integer({ minimum: 0 }),
+    needItems: Type.Integer({ minimum: 0 }),
+    needDeletes: Type.Integer({ minimum: 0 }),
+    remoteState: Type.Union([
+      Type.Literal('unknown'),
+      Type.Literal('paused'),
+      Type.Literal('notSharing'),
+      Type.Literal('valid'),
+    ]),
+  },
+  { $id: 'FolderPeerProgress', additionalProperties: false },
+);
+
+export type FolderPeerProgress = Static<typeof FolderPeerProgressSchema>;
+
+export const FolderPathConflictSchema = Type.Object(
+  {
+    folderId: FolderIdSchema,
+    label: Type.String({ minLength: 1, maxLength: 128 }),
+    relation: Type.Union([
+      Type.Literal('same'),
+      Type.Literal('ancestor'),
+      Type.Literal('descendant'),
+    ]),
+  },
+  { $id: 'FolderPathConflict', additionalProperties: false },
+);
+
+export type FolderPathConflict = Static<typeof FolderPathConflictSchema>;
+
 export const FolderSchema = Type.Object(
   {
     id: FolderIdSchema,
@@ -31,7 +78,17 @@ export const FolderSchema = Type.Object(
     localBytes: Type.Integer({ minimum: 0 }),
     globalBytes: Type.Integer({ minimum: 0 }),
     needBytes: Type.Integer({ minimum: 0 }),
+    needItems: Type.Optional(Type.Integer({ minimum: 0 })),
+    needDeletes: Type.Optional(Type.Integer({ minimum: 0 })),
+    receiveOnlyChangedItems: Type.Optional(Type.Integer({ minimum: 0 })),
+    receiveOnlyChangedBytes: Type.Optional(Type.Integer({ minimum: 0 })),
+    peerProgress: Type.Optional(Type.Array(FolderPeerProgressSchema)),
+    pathConflicts: Type.Optional(Type.Array(FolderPathConflictSchema)),
+    rescanIntervalSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
+    lastCompletedAt: Type.Optional(IsoDateTimeSchema),
     error: Type.Union([Type.String(), Type.Null()]),
+    errorCode: Type.Union([FolderErrorCodeSchema, Type.Null()]),
+    errorCount: Type.Integer({ minimum: 0 }),
     versioningDays: Type.Integer({ minimum: 0, maximum: 3650 }),
   },
   { $id: 'Folder', additionalProperties: false },
@@ -64,6 +121,8 @@ export const UpdateFolderRequestSchema = Type.Object(
     deviceIds: Type.Optional(Type.Array(DeviceIdSchema, { uniqueItems: true })),
     type: Type.Optional(FolderTypeSchema),
     versioningDays: Type.Optional(Type.Integer({ minimum: 0, maximum: 3650 })),
+    directoryId: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+    confirmDirectoryMove: Type.Optional(Type.Boolean()),
   },
   { $id: 'UpdateFolderRequest', additionalProperties: false, minProperties: 1 },
 );
@@ -105,8 +164,9 @@ export type PendingFolderList = Static<typeof PendingFolderListSchema>;
 
 export const AcceptPendingFolderRequestSchema = Type.Object(
   {
-    directoryId: Type.String({ minLength: 1, maxLength: 512 }),
+    directoryId: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
     type: Type.Optional(FolderTypeSchema),
+    useExisting: Type.Optional(Type.Boolean()),
   },
   { $id: 'AcceptPendingFolderRequest', additionalProperties: false },
 );
@@ -160,8 +220,23 @@ export const VersionEntrySchema = Type.Object(
 
 export type VersionEntry = Static<typeof VersionEntrySchema>;
 
+export const VersionListQuerySchema = Type.Object(
+  {
+    search: Type.Optional(Type.String({ maxLength: 255 })),
+    path: Type.Optional(RelativePathSchema),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+  },
+  { $id: 'VersionListQuery', additionalProperties: false },
+);
+
+export type VersionListQuery = Static<typeof VersionListQuerySchema>;
+
 export const VersionListSchema = Type.Object(
-  { items: Type.Array(VersionEntrySchema) },
+  {
+    items: Type.Array(VersionEntrySchema),
+    nextCursor: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  },
   { $id: 'VersionList', additionalProperties: false },
 );
 
@@ -183,3 +258,65 @@ export const RevealFileRequestSchema = Type.Object(
 );
 
 export type RevealFileRequest = Static<typeof RevealFileRequestSchema>;
+
+export const FolderIgnoreListSchema = Type.Object(
+  {
+    lines: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 10_000 }),
+    hasIncludes: Type.Boolean(),
+  },
+  { $id: 'FolderIgnoreList', additionalProperties: false },
+);
+
+export type FolderIgnoreList = Static<typeof FolderIgnoreListSchema>;
+
+export const UpdateFolderIgnoresRequestSchema = Type.Object(
+  { lines: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 10_000 }) },
+  { $id: 'UpdateFolderIgnoresRequest', additionalProperties: false },
+);
+
+export type UpdateFolderIgnoresRequest = Static<typeof UpdateFolderIgnoresRequestSchema>;
+
+export const FolderItemErrorSchema = Type.Object(
+  { path: RelativePathSchema, message: Type.String({ minLength: 1, maxLength: 2048 }) },
+  { $id: 'FolderItemError', additionalProperties: false },
+);
+
+export const FolderErrorListSchema = Type.Object(
+  {
+    items: Type.Array(FolderItemErrorSchema),
+    nextCursor: Type.Union([Type.String(), Type.Null()]),
+  },
+  { $id: 'FolderErrorList', additionalProperties: false },
+);
+
+export type FolderErrorList = Static<typeof FolderErrorListSchema>;
+
+export const FolderConflictSchema = Type.Object(
+  {
+    conflictPath: RelativePathSchema,
+    originalPath: Type.Union([RelativePathSchema, Type.Null()]),
+    size: Type.Integer({ minimum: 0 }),
+    modifiedAt: IsoDateTimeSchema,
+  },
+  { $id: 'FolderConflict', additionalProperties: false },
+);
+
+export const FolderConflictListSchema = Type.Object(
+  {
+    items: Type.Array(FolderConflictSchema),
+    nextCursor: Type.Union([Type.String(), Type.Null()]),
+  },
+  { $id: 'FolderConflictList', additionalProperties: false },
+);
+
+export type FolderConflictList = Static<typeof FolderConflictListSchema>;
+
+export const PagedFolderQuerySchema = Type.Object(
+  {
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+  },
+  { $id: 'PagedFolderQuery', additionalProperties: false },
+);
+
+export type PagedFolderQuery = Static<typeof PagedFolderQuerySchema>;

@@ -20,14 +20,21 @@ type moduleIdentity struct {
 }
 
 type inventorySource struct {
-	Module     string   `json:"module"`
-	CGOEnabled bool     `json:"cgoEnabled"`
-	BuildTags  []string `json:"buildTags"`
+	Module    string   `json:"module"`
+	BuildTags []string `json:"buildTags"`
+}
+
+type inventoryTarget struct {
+	ID         string `json:"id"`
+	GOOS       string `json:"goos"`
+	GOARCH     string `json:"goarch"`
+	CGOEnabled bool   `json:"cgoEnabled"`
 }
 
 type inventoryDocument struct {
-	Source  inventorySource  `json:"source"`
-	Modules []moduleIdentity `json:"modules"`
+	Source  inventorySource   `json:"source"`
+	Targets []inventoryTarget `json:"targets"`
+	Modules []moduleIdentity  `json:"modules"`
 }
 
 func main() {
@@ -59,8 +66,19 @@ func main() {
 		fatalf("Syncthing build info is missing GOOS/GOARCH")
 	}
 	expectedCGO := "0"
-	if inventory.Source.CGOEnabled {
-		expectedCGO = "1"
+	targetFound := false
+	for _, candidate := range inventory.Targets {
+		if candidate.GOOS+"-"+candidate.GOARCH != target {
+			continue
+		}
+		targetFound = true
+		if candidate.CGOEnabled {
+			expectedCGO = "1"
+		}
+		break
+	}
+	if !targetFound {
+		fatalf("Go module inventory has no build target %s", target)
 	}
 	if settings["CGO_ENABLED"] != expectedCGO {
 		fatalf("Syncthing CGO_ENABLED=%q, expected %s", settings["CGO_ENABLED"], expectedCGO)

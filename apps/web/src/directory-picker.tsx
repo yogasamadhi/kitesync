@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Button } from '@kitesync/ui';
 import { api } from './api.js';
 
@@ -10,15 +10,20 @@ export interface SelectedDirectory {
 
 export function DirectoryPicker({
   selected,
+  native,
+  nodeName,
   onSelect,
 }: {
   selected: SelectedDirectory | undefined;
+  native: boolean;
+  nodeName: string;
   onSelect: (directory: SelectedDirectory) => void;
 }) {
   const [opened, setOpened] = useState(false);
   const [currentId, setCurrentId] = useState<string>();
   const [cursor, setCursor] = useState<string>();
   const [cursorHistory, setCursorHistory] = useState<string[]>([]);
+  const [trail, setTrail] = useState<Array<{ id: string; label: string }>>([]);
   const roots = useQuery({
     queryKey: ['directory-roots'],
     queryFn: api.directoryRoots,
@@ -29,11 +34,19 @@ export function DirectoryPicker({
     queryFn: () => api.directories(currentId!, { ...(cursor ? { cursor } : {}), limit: 100 }),
     enabled: opened && Boolean(currentId),
   });
+  const nativePicker = useMutation({
+    mutationFn: api.pickDirectory,
+    onSuccess: (directory) => {
+      if (directory) onSelect(directory);
+    },
+  });
 
-  function navigate(id: string | undefined) {
+  function navigate(id: string | undefined, label?: string) {
     setCurrentId(id);
     setCursor(undefined);
     setCursorHistory([]);
+    if (!id) setTrail([]);
+    else if (label) setTrail((items) => [...items, { id, label }]);
   }
 
   function closeWith(directory: SelectedDirectory) {
@@ -43,30 +56,49 @@ export function DirectoryPicker({
 
   return (
     <div className="directory-picker">
-      <button type="button" className="directory-trigger" onClick={() => setOpened(!opened)}>
+      <button
+        type="button"
+        className="directory-trigger"
+        disabled={nativePicker.isPending}
+        onClick={() => (native ? nativePicker.mutate() : setOpened(!opened))}
+      >
         <span aria-hidden="true">▱</span>
         <span>
-          <b>{selected?.label ?? '选择本机目录'}</b>
-          <small>{selected ? '目录已选择，可点击更改' : '只会向服务传递临时目录标识'}</small>
+          <b>{selected?.label ?? `选择 ${nodeName} 的目录`}</b>
+          <small>
+            {nativePicker.isPending
+              ? '正在等待系统选择…'
+              : selected
+                ? '目录已选择，可点击更改'
+                : native
+                  ? '使用访达或文件资源管理器选择'
+                  : '只会向服务传递临时目录标识'}
+          </small>
         </span>
-        <i>{opened ? '收起' : '浏览'}</i>
+        <i>{nativePicker.isPending ? '等待选择' : !native && opened ? '收起' : '浏览'}</i>
       </button>
 
-      {opened && (
+      {nativePicker.error && (
+        <p className="form-error">
+          {nativePicker.error instanceof Error ? nativePicker.error.message : '无法打开目录选择器'}
+        </p>
+      )}
+
+      {!native && opened && (
         <div className="directory-popover">
           {!currentId ? (
             <>
               <div className="picker-title">
-                <b>可用位置</b>
+                <b>{nodeName} · 可用位置</b>
                 <small>请选择一个位置继续</small>
               </div>
-              {roots.isLoading && <p className="muted-line">正在读取本机目录…</p>}
+              {roots.isLoading && <p className="muted-line">正在读取 {nodeName} 的目录…</p>}
               {roots.data?.items.map((root) => (
                 <button
                   type="button"
                   className="directory-row"
                   key={root.id}
-                  onClick={() => navigate(root.id)}
+                  onClick={() => navigate(root.id, root.label)}
                 >
                   <span className="folder-glyph">▱</span>
                   <b>{root.label}</b>
@@ -79,14 +111,20 @@ export function DirectoryPicker({
               <div className="picker-toolbar">
                 <button
                   type="button"
-                  onClick={() => navigate(listing.data?.parentId ?? undefined)}
+                  onClick={() => {
+                    const next = trail.slice(0, -1);
+                    setTrail(next);
+                    navigate(next.at(-1)?.id);
+                  }}
                   aria-label="返回上一级"
                 >
                   ←
                 </button>
                 <div>
                   <b>{listing.data?.current.label ?? '正在读取…'}</b>
-                  <small>当前目录</small>
+                  <small>
+                    {nodeName} / {trail.map((item) => item.label).join(' / ')}
+                  </small>
                 </div>
                 {listing.data && (
                   <Button type="button" onClick={() => closeWith(listing.data.current)}>
@@ -95,13 +133,26 @@ export function DirectoryPicker({
                 )}
               </div>
               {listing.isLoading && <p className="muted-line">正在读取子目录…</p>}
-              {listing.isError && <p className="form-error">无法读取此目录</p>}
+              {listing.isError && (
+                <p className="form-error">
+                  无法读取此目录，句柄或分页可能已过期。{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigate(undefined);
+                      void roots.refetch();
+                    }}
+                  >
+                    重新选择
+                  </button>
+                </p>
+              )}
               {listing.data?.items.map((entry) => (
                 <button
                   type="button"
                   className="directory-row"
                   key={entry.id}
-                  onClick={() => navigate(entry.id)}
+                  onClick={() => navigate(entry.id, entry.name)}
                 >
                   <span className="folder-glyph">▱</span>
                   <b>{entry.name}</b>

@@ -102,6 +102,27 @@ describe('统一节点契约', () => {
     expect(Object.keys(FolderSchema.properties)).toContain('pathLabel');
   });
 
+  it('文件夹错误包含可执行处理所需的分类和数量', () => {
+    expect(
+      Value.Check(FolderSchema, {
+        id: 'photos',
+        label: '家庭照片',
+        pathLabel: '照片',
+        type: 'sendreceive',
+        paused: false,
+        deviceIds: [],
+        state: 'error',
+        localBytes: 0,
+        globalBytes: 0,
+        needBytes: 0,
+        error: '请先确认同步目录',
+        errorCode: 'marker_missing',
+        errorCount: 0,
+        versioningDays: 30,
+      }),
+    ).toBe(true);
+  });
+
   it('设备更新支持名称、地址和暂停状态', () => {
     expect(Value.Check(UpdateDeviceRequestSchema, { name: '书房电脑' })).toBe(true);
     expect(Value.Check(UpdateDeviceRequestSchema, { addresses: [], paused: false })).toBe(true);

@@ -231,6 +231,10 @@ jobs:
           bun run --filter @kitesync/web build
           bun run syncthing:build
           bun run syncthing:build-verify
+      - name: Verify real macOS filesystem watcher
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bun run test:integration
       - name: Package and sign Windows
         if: runner.os == 'Windows'
         shell: bash

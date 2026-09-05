@@ -13,6 +13,11 @@ bun run dev:all
 `dev:all` 在宿主机启动 contracts/API client watch、Vite 和 Node Service。开发状态位于仓库的
 `.kitesync-dev/node`，管理页默认只监听 `127.0.0.1:3210`。
 
+macOS x64/arm64 的 sidecar 使用 Xcode 工具链和 CGO 构建，最低系统版本为 macOS 13；Linux 与
+Windows 目标继续关闭 CGO。`SYNCTHING_BUILD.json` 会记录目标的 CGO 策略和 macOS 最低版本，
+旧的无 CGO macOS 缓存会被视为失效。macOS 上不要用 `CGO_ENABLED=0` 手工替换产物，否则系统
+文件事件监视不可用，只能等待定时扫描。
+
 Node Service 使用独立开发监督器：实际持有单实例锁的 `serve` 运行在子进程中；源码或 contracts
 产物变化时，监督器会先等待旧进程停止、释放锁并结束 sidecar，再启动新一代服务。不要把
 `serve` 直接包在 `bun --watch` 中，否则 Bun 的同 PID hard restart 会把上一代锁误认为另一个
@@ -65,6 +70,8 @@ bun run dev:reset
 5. 验证 `sendreceive`、`sendonly`、`receiveonly` 和本机版本恢复。
 
 不要为方便测试打开 global discovery、Relay、NAT/STUN 或 Syncthing REST 的 LAN 监听。
+双节点集成测试最后一次写入不调用 scan API，必须依靠真实 watcher 自动同步；发布 CI 会在
+macOS x64 和 arm64 原生 runner 重复该验证。
 
 ## 质量门禁
 
