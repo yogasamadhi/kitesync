@@ -22,6 +22,18 @@ const CURSOR_TTL_MS = 5 * 60_000;
 const MAX_HANDLES = 4_096;
 const MAX_CURSORS = 1_000;
 
+function preserveWindowsDriveRoot(requested: string, canonical: string) {
+  return process.platform === 'win32' &&
+    /^[A-Za-z]:[\\/]$/.test(requested) &&
+    /^[A-Za-z]:$/.test(canonical)
+    ? `${canonical}\\`
+    : canonical;
+}
+
+async function canonicalPath(path: string) {
+  return preserveWindowsDriveRoot(path, await realpath(path));
+}
+
 export function isWithinRoot(root: string, candidate: string) {
   const child = relative(root, candidate);
   return child === '' || (!child.startsWith(`..${sep}`) && child !== '..' && !isAbsolute(child));
@@ -47,7 +59,7 @@ async function availableRoots(configured?: string[]) {
   const roots: Array<{ path: string; label: string }> = [];
   for (const candidate of candidates) {
     try {
-      const canonical = await realpath(candidate.path);
+      const canonical = await canonicalPath(candidate.path);
       if ((await stat(canonical)).isDirectory() && !roots.some((item) => item.path === canonical)) {
         roots.push({ path: canonical, label: candidate.label });
       }
@@ -130,7 +142,7 @@ export class DirectoryBrowser {
   async resolveDirectory(handleId: string) {
     const handle = this.getHandle(handleId);
     await this.assertNoSymlink(handle.root, handle.path);
-    const canonical = await realpath(handle.path);
+    const canonical = await canonicalPath(handle.path);
     if (!isWithinRoot(handle.root, canonical) || !(await stat(canonical)).isDirectory()) {
       throw new Error('目录已失效或超出允许范围');
     }
@@ -145,7 +157,7 @@ export class DirectoryBrowser {
 
   async registerSelection(path: string): Promise<DirectoryRoot> {
     if (!isAbsolute(path)) throw new Error('系统目录选择器返回了无效路径');
-    const canonical = await realpath(path);
+    const canonical = await canonicalPath(path);
     if (!(await stat(canonical)).isDirectory()) throw new Error('选择的路径不是目录');
 
     let root = canonical;

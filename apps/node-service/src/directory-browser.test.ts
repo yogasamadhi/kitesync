@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DirectoryBrowser } from './directory-browser.js';
@@ -53,5 +53,17 @@ describe('本机目录选择', () => {
 
     const outside = await temporaryDirectory();
     await expect(browser.registerSelection(outside)).rejects.toThrow('超出允许范围');
+  });
+
+  it.runIf(process.platform === 'win32')('可浏览并选择 Windows 盘符根目录', async () => {
+    const driveRoot = parse(tmpdir()).root;
+    const browser = new DirectoryBrowser([driveRoot]);
+    const rootId = (await browser.roots()).items[0]?.id;
+    expect(rootId).toBeTypeOf('string');
+
+    const listing = await browser.list(rootId!, 100);
+
+    expect(listing.parentId).toBeNull();
+    await expect(browser.resolveDirectory(rootId!)).resolves.toBe(driveRoot);
   });
 });

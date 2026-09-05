@@ -13,6 +13,10 @@ class CommandError extends Error {
   }
 }
 
+const windowsDpapiPrelude =
+  '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);' +
+  'Add-Type -AssemblyName System.Security;';
+
 function run(file: string, args: string[], input?: string) {
   return new Promise<string>((resolve, reject) => {
     const child = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -111,6 +115,7 @@ export class SecretStore {
     if (process.platform === 'win32') {
       const encrypted = await readFile(join(this.stateDirectory, 'open-secret.dpapi'), 'utf8');
       const script =
+        windowsDpapiPrelude +
         '$v=[Console]::In.ReadToEnd();$b=[Convert]::FromBase64String($v.Trim());' +
         '$p=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);' +
         '[Console]::Out.Write([Text.Encoding]::UTF8.GetString($p))';
@@ -153,6 +158,7 @@ export class SecretStore {
     }
     if (process.platform === 'win32') {
       const script =
+        windowsDpapiPrelude +
         '$v=[Console]::In.ReadToEnd();$b=[Text.Encoding]::UTF8.GetBytes($v);' +
         '$p=[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);' +
         '[Console]::Out.Write([Convert]::ToBase64String($p))';
